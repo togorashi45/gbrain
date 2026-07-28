@@ -51,19 +51,14 @@ fi
 command -v bun    >/dev/null || fail "bun not found — install: curl -fsSL https://bun.sh/install | bash"
 command -v gbrain >/dev/null || log "gbrain not on PATH yet — installing…"
 
-# --- 1. Install / upgrade gbrain ------------------------------------------------
-GBRAIN_PKG="${GBRAIN_PKG:-github:rspur-hq/gbrain}"
-log "installing gbrain from $GBRAIN_PKG"
-# Pitfall: if upstream gbrain (github:garrytan/gbrain) is already installed
-# globally, bun's global resolver reports a bogus "DependencyLoop" on the
-# same-name fork package. Removing the old global first avoids it.
-bun remove -g gbrain 2>/dev/null || true
-bun install -g "$GBRAIN_PKG" || log "already installed / upgrade skipped (continuing)"
-# Bun blocks postinstall hooks by default — trust explicitly (runs migrations).
-bun pm -g trust gbrain 2>/dev/null || true
-command -v gbrain >/dev/null || fail "gbrain still not on PATH after install"
-
-# --- 2. File-plane config.json --------------------------------------------------
+# --- 1. File-plane config.json (BEFORE install — order matters) ----------------
+# Pitfall (2026-07-28, smoke-test finding): if DATABASE_URL is exported when
+# `bun pm -g trust gbrain` runs the postinstall, migrations bootstrap the
+# schema with gbrain's COMPILED DEFAULTS (ZeroEntropy zembed-1 @ 1280 dims).
+# A config.json written afterwards (e.g. 1536 dims) then mismatches the
+# vector column and EVERY write fails with "expected 1280 dimensions".
+# Writing config.json first means any install-time bootstrap uses the real
+# recipe.
 mkdir -p "$CONFIG_DIR"
 
 # Preserve an existing database_url — it holds the real Postgres password and
@@ -73,7 +68,7 @@ if [ -f "$CONFIG_JSON" ]; then
   EXISTING_DB_URL=$(python3 -c "import json;print(json.load(open('$CONFIG_JSON')).get('database_url',''))" 2>/dev/null || true)
 fi
 DATABASE_URL="${DATABASE_URL:-$EXISTING_DB_URL}"
-[ -n "$DATABASE_URL" ] || fail "no database_url: set DATABASE_URL=postgresql://user:pass@host:5432/brain (or pre-seed $CONFIG_JSON)"
+[ -n "$DATABASE_URL" ] || fail "no database_url: set DATABASE_URL=postgresql://user:***@host:5432/brain (or pre-seed $CONFIG_JSON)"
 
 # Merge (not clobber): keep unknown keys the user already has.
 python3 - "$CONFIG_JSON" "$DATABASE_URL" "$EMBED_MODEL" "$EMBED_DIMS" "$CHAT_MODEL" "$RERANKER_MODEL" <<'PY'
@@ -96,6 +91,18 @@ cfg.setdefault("mcp", {"publish_skills": True})
 json.dump(cfg, open(path, "w"), indent=2)
 print(f"[vm-setup] wrote {path}")
 PY
+
+# --- 2. Install / upgrade gbrain ------------------------------------------------
+GBRAIN_PKG="${GBRAIN_PKG:-github:rspur-hq/gbrain}"
+log "installing gbrain from $GBRAIN_PKG"
+# Pitfall: if upstream gbrain (github:garrytan/gbrain) is already installed
+# globally, bun's global resolver reports a bogus "DependencyLoop" on the
+# same-name fork package. Removing the old global first avoids it.
+bun remove -g gbrain 2>/dev/null || true
+bun install -g "$GBRAIN_PKG" || log "already installed / upgrade skipped (continuing)"
+# Bun blocks postinstall hooks by default — trust explicitly (runs migrations).
+bun pm -g trust gbrain 2>/dev/null || true
+command -v gbrain >/dev/null || fail "gbrain still not on PATH after install"
 
 # --- 3. DB-plane mirror ----------------------------------------------------------
 # v0.42.67+: file-plane chat_model now beats hardcoded tier defaults, so these
