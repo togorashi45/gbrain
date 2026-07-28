@@ -159,6 +159,19 @@ on machine-generated content. The deterministic, zero-LLM-cost remediation:
    organic before touching; operator-caused halts from remediation can be
    zeroed with full disclosure.
 
+### 9. cycle_freshness silently decays 100 → 95 between daily dream runs
+`cycle_freshness` warns when `last_full_cycle_at` is older than 6h
+(`GBRAIN_CYCLE_FRESHNESS_WARN_HOURS`, default 6; fail at 24h). A brain whose
+dream cron runs once daily is "fresh" only 6h/day — doctor reads 100/100 in
+the morning and 95/100 every evening. Fix the CADENCE, not the threshold
+(the check is honest; staleness compounds): schedule dream every 6h, e.g.
+`hermes cron edit <dream-job-id> --schedule '5 */6 * * *'`. Steady-state
+cost is small — dream phases are incremental. Related landmine:
+`/opt/brain/.env` exports `GBRAIN_DATABASE_URL` — any ad-hoc shell that
+sources env files for keys and then targets a different brain MUST
+re-export `GBRAIN_HOME` + `GBRAIN_DATABASE_URL` after sourcing, or every
+gbrain command silently hits production.
+
 ## Verification checklist (the 100/100 state)
 
 - [ ] `gbrain doctor` — all categories 100
