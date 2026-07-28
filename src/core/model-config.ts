@@ -9,8 +9,12 @@
  *   3. Old-key config (deprecated dream.synthesize.model, dream.patterns.model)
  *      — read with stderr deprecation warning, one-per-process
  *   4. Global default (models.default)
- *   5. Env var (process.env[envVar] or GBRAIN_MODEL)
- *   6. Hardcoded fallback (caller-supplied)
+ *   5. Tier override (models.tier.<tier>)
+ *   6. Env var (process.env[envVar] or GBRAIN_MODEL)
+ *   7. Explicit file-plane config.json value (configFileValue) — beats ONLY
+ *      the hardcoded defaults below; every DB-plane/env override still wins
+ *   8. Hardcoded tier default (TIER_DEFAULTS.<tier>)
+ *   9. Hardcoded fallback (caller-supplied)
  *
  * Aliases (`opus`, `sonnet`, `haiku`, `gemini`, `gpt`) resolve at the end so any
  * tier can use a short name. Unknown alias passes through unchanged so users can
@@ -34,6 +38,17 @@ export interface ResolveModelOpts {
   deprecatedConfigKey?: string;
   /** Env var to consult after global default. Defaults to `GBRAIN_MODEL`. */
   envVar?: string;
+  /**
+   * Explicit file-plane (config.json) value set by the user (v0.42.67).
+   * Checked after env vars but BEFORE the hardcoded tier default and the
+   * caller-supplied fallback. Rationale: the hardcoded TIER_DEFAULTS used to
+   * shadow an explicit config.json choice (observed on a VM where
+   * config.json's `chat_model: openrouter:...` was silently overridden by
+   * `anthropic:claude-sonnet-4-6` because no DB-plane models.* key was set).
+   * An explicit config-file value is user intent; it must lose to every
+   * DB-plane/env override but never to a code-level default.
+   */
+  configFileValue?: string;
   /**
    * Tier classification (v0.31.12). Looked up after `models.default` and
    * before the env var. Routing groups: `utility` (haiku-class, classification
@@ -190,13 +205,21 @@ export async function resolveModel(
     return enforceSubagentCapable(resolved, opts.tier, `env:${envVar}`);
   }
 
-  // 7. Tier default (v0.31.12 — when no override beats us, the tier's
+  // 7. Explicit file-plane config (config.json) — beats ONLY the hardcoded
+  //    defaults below. Every DB-plane key (models.chat / models.default /
+  //    models.tier.*) and env var above still wins over it.
+  if (opts.configFileValue && opts.configFileValue.trim()) {
+    const resolved = await resolveAlias(engine, opts.configFileValue.trim());
+    return enforceSubagentCapable(resolved, opts.tier, 'config.json');
+  }
+
+  // 8. Tier default (v0.31.12 — when no override beats us, the tier's
   //    canonical model wins over caller-supplied fallback)
   if (opts.tier && TIER_DEFAULTS[opts.tier]) {
     return await resolveAlias(engine, TIER_DEFAULTS[opts.tier]);
   }
 
-  // 8. Hardcoded fallback (caller-supplied)
+  // 9. Hardcoded fallback (caller-supplied)
   return await resolveAlias(engine, opts.fallback);
 }
 

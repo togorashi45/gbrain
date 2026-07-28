@@ -2,6 +2,17 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.67.0] - 2026-07-28
+
+### Fixed
+
+- Chat/expansion model resolution no longer shadows an explicit file-plane `config.json` choice with hardcoded tier defaults. `resolveModel()` gains a `configFileValue` slot (checked after env vars, before `TIER_DEFAULTS`), and `reconfigureGatewayWithEngine` feeds it the user's actual config.json values. Pre-fix, installs with no DB-plane `models.*` keys silently ran chat on `anthropic:claude-sonnet-4-6` regardless of `chat_model` in config.json — dream/extract produced zero takes on non-Anthropic setups.
+
+### Added
+
+- `scripts/vm-hermes-setup.sh` — idempotent VM provisioning for the verified Hermes + Postgres recipe: file-plane config, DB-plane mirror, Hermes MCP registration with the real `database_url` extracted from config.json, and a `gbrain doctor` verification pass. Every value env-overridable.
+- `docs/INSTALL-VM-HERMES.md` — the known-good VM install recipe with the pitfalls that cost real debugging time (GBRAIN_HOME config path, file-plane shadow, MCP `GBRAIN_DATABASE_URL` mismatch, OpenRouter reranker, stale upgrade-errors).
+
 ## [0.42.66.1] - 2026-07-27
 
 ### Fixed

@@ -122,6 +122,17 @@ const DEFAULT_CHAT_MODEL = 'anthropic:claude-sonnet-4-6';
 const DEFAULT_RERANKER_MODEL = 'zeroentropyai:zerank-2';
 
 let _config: AIGatewayConfig | null = null;
+/**
+ * v0.42.67: the chat/expansion values the USER explicitly set in the
+ * file-plane config (config.json), captured before `configureGateway`
+ * backfills defaults. `reconfigureGatewayWithEngine` feeds these into
+ * resolveModel's `configFileValue` slot so an explicit config.json choice
+ * beats the hardcoded TIER_DEFAULTS (pre-fix the tier default silently
+ * shadowed config.json's chat_model — root cause of "wrong chat model"
+ * reports on DB-config-less installs).
+ */
+let _filePlaneChatModel: string | undefined;
+let _filePlaneExpansionModel: string | undefined;
 const _modelCache = new Map<string, any>();
 
 /**
@@ -468,6 +479,10 @@ export function recipeSupportsStructuredOutputs(recipe: Recipe): boolean {
 
 /** Configure the gateway. Called by cli.ts#connectEngine. Clears cached models. */
 export function configureGateway(config: AIGatewayConfig): void {
+  // Capture explicit file-plane values BEFORE default-backfill below erases
+  // the "user actually set this" signal (see _filePlane* comment above).
+  _filePlaneChatModel = config.chat_model;
+  _filePlaneExpansionModel = config.expansion_model;
   _config = {
     embedding_model: config.embedding_model ?? DEFAULT_EMBEDDING_MODEL,
     // #1292/D6: do NOT fabricate a default here. Every gateway-internal reader
@@ -537,11 +552,13 @@ export async function reconfigureGatewayWithEngine(engine: BrainEngine): Promise
   const newExpansion = await resolveModel(engine, {
     configKey: 'models.expansion',
     tier: 'utility',
+    configFileValue: _filePlaneExpansionModel,
     fallback: cfg.expansion_model ?? DEFAULT_EXPANSION_MODEL,
   });
   const newChat = await resolveModel(engine, {
     configKey: 'models.chat',
     tier: 'reasoning',
+    configFileValue: _filePlaneChatModel,
     fallback: cfg.chat_model ?? DEFAULT_CHAT_MODEL,
   });
 

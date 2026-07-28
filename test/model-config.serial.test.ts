@@ -244,3 +244,66 @@ describe('resolveModel — v0.31.12 tier system', () => {
     expect(result.length).toBeGreaterThan(0);
   });
 });
+
+describe('resolveModel — v0.42.67 configFileValue (file-plane shadow fix)', () => {
+  test('configFileValue beats TIER_DEFAULTS (the VM shadow bug)', async () => {
+    // Root cause on installs with no DB-plane models.* keys: config.json's
+    // explicit chat_model was silently overridden by the hardcoded tier
+    // default. The file-plane value must win over TIER_DEFAULTS.
+    const m = await resolveModel(stub as never, {
+      tier: 'reasoning',
+      configFileValue: 'openrouter:openai/gpt-5.2',
+      fallback: 'sonnet',
+    });
+    expect(m).toBe('openrouter:openai/gpt-5.2');
+  });
+
+  test('configFileValue loses to models.chat configKey', async () => {
+    stub.set('models.chat', 'openai:gpt-5');
+    const m = await resolveModel(stub as never, {
+      configKey: 'models.chat',
+      tier: 'reasoning',
+      configFileValue: 'openrouter:openai/gpt-5.2',
+      fallback: 'sonnet',
+    });
+    expect(m).toBe('openai:gpt-5');
+  });
+
+  test('configFileValue loses to models.default', async () => {
+    stub.set('models.default', 'opus');
+    const m = await resolveModel(stub as never, {
+      tier: 'reasoning',
+      configFileValue: 'openrouter:openai/gpt-5.2',
+      fallback: 'sonnet',
+    });
+    expect(m).toBe(DEFAULT_ALIASES.opus);
+  });
+
+  test('configFileValue loses to models.tier.<tier>', async () => {
+    stub.set('models.tier.reasoning', 'haiku');
+    const m = await resolveModel(stub as never, {
+      tier: 'reasoning',
+      configFileValue: 'openrouter:openai/gpt-5.2',
+      fallback: 'sonnet',
+    });
+    expect(m).toBe(DEFAULT_ALIASES.haiku);
+  });
+
+  test('configFileValue loses to env var', async () => {
+    process.env.GBRAIN_MODEL = 'gemini';
+    const m = await resolveModel(stub as never, {
+      tier: 'reasoning',
+      configFileValue: 'openrouter:openai/gpt-5.2',
+      fallback: 'sonnet',
+    });
+    expect(m).toBe(DEFAULT_ALIASES.gemini);
+  });
+
+  test('no configFileValue → old behavior (TIER_DEFAULTS beats fallback)', async () => {
+    const m = await resolveModel(stub as never, {
+      tier: 'reasoning',
+      fallback: 'haiku',
+    });
+    expect(m).toBe(TIER_DEFAULTS.reasoning);
+  });
+});
