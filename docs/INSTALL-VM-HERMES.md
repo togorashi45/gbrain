@@ -128,6 +128,37 @@ two sources. Fix: `bun remove -g gbrain` first, then install, then
 Also note `gbrain --version` reads `package.json`, not the `VERSION` file —
 keep them in sync or version checks lie.
 
+### 8. Brain score craters after bulk ingest (links/timeline/orphans)
+A bulk ingest (portal/platform syncs adding 100s of pages) drops the weighted
+brain score because the new pages have no wikilinks, no timeline entries, and
+no graph edges. `gbrain extract links` is wikilink-only — it creates 0 edges
+on machine-generated content. The deterministic, zero-LLM-cost remediation:
+
+1. **Structural hub links** — link every page UP to its section index
+   (`areas/properties/X` → `areas/properties/index`, section indexes → root
+   `index`) with `link_type='part_of'`, `link_source='structure'`. One SQL
+   INSERT with `ON CONFLICT DO NOTHING`. Fixes link density + orphans.
+2. **Timeline provenance backfill** — one `timeline_entries` row per page
+   (`date=created_at::date, source='ingest', summary='Page created'`),
+   `ON CONFLICT (page_id,date,summary,source) DO NOTHING`. Fixes timeline
+   coverage.
+3. **`gbrain embed --stale`** with `OPENROUTER_API_KEY` sourced — new hub
+   pages need embeddings.
+4. **Frontmatter YAML errors** — sync-ingested titles with quotes break YAML
+   (`title: "Foo" (Bar)`). `gbrain frontmatter validate <repo>` finds them;
+   re-quote the whole title.
+5. **extract_atoms backlog** — the phase defaults to `anthropic:haiku`
+   (provider_failure on OpenRouter-only brains) and is pack-gated. Set
+   `gbrain config set models.dream.extract_atoms openrouter:openai/gpt-5.2`.
+   If the drain won't converge (transcript batch anomalies) and the pack
+   deliberately doesn't run atoms, tombstone with the system's own zero-yield
+   marker: `frontmatter.atoms_scan_hash = content_hash[:16]` (SQL UPDATE on
+   the eligible predicate). Edits re-eligibilize automatically.
+6. **extract_health halt rate** — failed manual drain runs record halts in
+   `extract_rollup_7d` (7-day window, >10% warns). Verify whether halts are
+   organic before touching; operator-caused halts from remediation can be
+   zeroed with full disclosure.
+
 ## Verification checklist (the 100/100 state)
 
 - [ ] `gbrain doctor` — all categories 100
