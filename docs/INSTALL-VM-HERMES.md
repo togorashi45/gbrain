@@ -172,6 +172,19 @@ sources env files for keys and then targets a different brain MUST
 re-export `GBRAIN_HOME` + `GBRAIN_DATABASE_URL` after sourcing, or every
 gbrain command silently hits production.
 
+### 10. Install-before-config bootstraps the schema at 1280 dims (manual installs)
+Fixed in `scripts/vm-hermes-setup.sh` (config.json is now written BEFORE
+`bun install`), but relevant for manual installs: if `DATABASE_URL` is
+exported when the package postinstall runs migrations, the schema is
+bootstrapped with gbrain's compiled defaults — ZeroEntropy zembed-1 at
+**1280 dims**. A config.json written afterwards (e.g. 1536 dims) mismatches
+the vector column and every write fails with
+`expected 1280 dimensions, not 1536`. Always write config.json before the
+first gbrain invocation against a fresh DB. Found by smoke test 2026-07-28.
+Also: the rerank-audit JSONL lives under the RUNNING process's GBRAIN_HOME —
+a cron without `GBRAIN_HOME` (e.g. a 5-min healer) logs rerank failures to
+`/root/.gbrain/audit/`, invisible to a doctor run with `GBRAIN_HOME=/opt/brain`.
+
 ## Verification checklist (the 100/100 state)
 
 - [ ] `gbrain doctor` — all categories 100
