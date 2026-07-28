@@ -77,6 +77,12 @@ export function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
     expansion_model: c.expansion_model,
     chat_model: c.chat_model,
     chat_fallback_chain: c.chat_fallback_chain,
+    // v0.42.68.0 (Marcus audit / Jake): the reranker model was the ONE model
+    // string never threaded through this seam — getRerankerModel() read
+    // undefined on every install and rerank resolution silently fell back to
+    // the hardcoded dead `zeroentropyai:zerank-2` default. File-plane
+    // reranker_model now reaches the gateway like every other model string.
+    reranker_model: c.reranker_model,
     base_urls: { ...envBaseUrls, ...(c.provider_base_urls ?? {}) }, // config wins over env
     provider_chat_options: c.provider_chat_options,
     // #1249: process.env still wins over the config-plane fallback, BUT only for

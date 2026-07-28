@@ -2,6 +2,20 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.68.0] - 2026-07-28
+
+### Fixed
+- **`buildGatewayConfig()` now threads `reranker_model` through to the
+  gateway.** Before this, the reranker model was the only model string never
+  passed through the seam, so `getRerankerModel()` was always `undefined`
+  and `gateway.rerank()` silently fell back to the hardcoded
+  `zeroentropyai:zerank-2` default — file-plane reranker config was dead on
+  every install (found in Marcus's six-box audit). Adds `reranker_model` to
+  `GBrainConfig` + `KNOWN_CONFIG_KEYS` so `gbrain config set reranker_model`
+  works without `--force`. Pair with `provider_base_urls` for any
+  OpenAI-style `/rerank` endpoint (e.g. OpenRouter via the
+  `llama-server-reranker` recipe).
+
 ## [0.42.67.0] - 2026-07-28
 
 ### Fixed

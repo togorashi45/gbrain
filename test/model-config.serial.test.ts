@@ -307,3 +307,32 @@ describe('resolveModel — v0.42.67 configFileValue (file-plane shadow fix)', ()
     expect(m).toBe(TIER_DEFAULTS.reasoning);
   });
 });
+
+// ─── v0.42.68.0: buildGatewayConfig threads reranker_model (Marcus audit) ───
+// Regression: before this fix, buildGatewayConfig() never passed
+// reranker_model through, so getRerankerModel() was always undefined and
+// gateway.rerank() silently fell back to the hardcoded dead
+// 'zeroentropyai:zerank-2' default — file-plane reranker config was dead on
+// every install. Pure unit test on the seam's output (no gateway global
+// state touched).
+describe('v0.42.68.0 buildGatewayConfig reranker_model pass-through', () => {
+  test('file-plane reranker_model reaches the gateway config', async () => {
+    const { buildGatewayConfig } = await import('../src/core/ai/build-gateway-config.ts');
+    const cfg = buildGatewayConfig({
+      reranker_model: 'llama-server-reranker:cohere/rerank-4-fast',
+    } as never);
+    expect(cfg.reranker_model).toBe('llama-server-reranker:cohere/rerank-4-fast');
+  });
+
+  test('unset reranker_model stays undefined (opt-in, not pulled by default)', async () => {
+    const { buildGatewayConfig } = await import('../src/core/ai/build-gateway-config.ts');
+    const cfg = buildGatewayConfig({} as never);
+    expect(cfg.reranker_model).toBeUndefined();
+  });
+
+  test("reranker_model is a known config key ('gbrain config set' accepts it)", async () => {
+    const { KNOWN_CONFIG_KEYS } = await import('../src/core/config.ts');
+    expect(KNOWN_CONFIG_KEYS).toContain('reranker_model');
+  });
+});
+

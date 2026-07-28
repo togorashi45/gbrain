@@ -93,6 +93,17 @@ export interface GBrainConfig {
    * synthesize flows in their respective handlers (per D13 review decision).
    */
   chat_fallback_chain?: string[];
+  /**
+   * Default reranker model for `gateway.rerank()` (file plane). Without this
+   * field + the buildGatewayConfig pass-through (v0.42.68.0), the gateway
+   * never saw a configured reranker and silently fell back to the hardcoded
+   * `zeroentropyai:zerank-2` default — file-plane reranker config was dead
+   * on every install. Use a `provider:model` string, e.g.
+   * `llama-server-reranker:cohere/rerank-4-fast` with
+   * `provider_base_urls['llama-server-reranker']` pointing at any
+   * OpenAI-style `/rerank` endpoint (OpenRouter serves it).
+   */
+  reranker_model?: string;
   /** Optional base URL overrides for openai-compatible providers (keyed by recipe id). */
   provider_base_urls?: Record<string, string>;
   /** Optional chat request providerOptions overrides keyed by recipe id or "recipe:modelId". */
@@ -928,6 +939,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'expansion_model',
   'chat_model',
   'chat_fallback_chain',
+  'reranker_model',
   'provider_base_urls',
   'provider_chat_options',
   'storage',
