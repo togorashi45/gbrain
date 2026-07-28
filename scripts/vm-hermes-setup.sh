@@ -21,8 +21,9 @@
 #   CHAT_MODEL=openrouter:openai/gpt-5.2        (gpt-5.2-mini does NOT exist)
 #   EMBED_MODEL=openrouter:openai/text-embedding-3-small
 #   EMBED_DIMS=1536
-#   RERANKER_MODEL=llama-server-reranker:cohere/rerank-4-fast
-#   RERANKER_BASE_URL=https://openrouter.ai/api/v1
+#   RERANKER_MODEL=openrouter:cohere/rerank-4-fast   (native recipe — OpenRouter
+#     serves /rerank; no local server, no provider_base_urls hack. Verified
+#     2026-07-28, Marcus fleet audit + Atomic deploy)
 #   DATABASE_URL=postgresql://brain:<password>@127.0.0.1:5432/brain
 #
 # Usage:
@@ -35,8 +36,7 @@ GBRAIN_HOME="${GBRAIN_HOME:-/opt/brain}"
 CHAT_MODEL="${CHAT_MODEL:-openrouter:openai/gpt-5.2}"
 EMBED_MODEL="${EMBED_MODEL:-openrouter:openai/text-embedding-3-small}"
 EMBED_DIMS="${EMBED_DIMS:-1536}"
-RERANKER_MODEL="${RERANKER_MODEL:-llama-server-reranker:cohere/rerank-4-fast}"
-RERANKER_BASE_URL="${RERANKER_BASE_URL:-https://openrouter.ai/api/v1}"
+RERANKER_MODEL="${RERANKER_MODEL:-openrouter:cohere/rerank-4-fast}"
 HERMES_CONFIG="${HERMES_CONFIG:-$HOME/.hermes/config.yaml}"
 CONFIG_DIR="$GBRAIN_HOME/.gbrain"
 CONFIG_JSON="$CONFIG_DIR/config.json"
@@ -76,9 +76,9 @@ DATABASE_URL="${DATABASE_URL:-$EXISTING_DB_URL}"
 [ -n "$DATABASE_URL" ] || fail "no database_url: set DATABASE_URL=postgresql://user:pass@host:5432/brain (or pre-seed $CONFIG_JSON)"
 
 # Merge (not clobber): keep unknown keys the user already has.
-python3 - "$CONFIG_JSON" "$DATABASE_URL" "$EMBED_MODEL" "$EMBED_DIMS" "$CHAT_MODEL" "$RERANKER_MODEL" "$RERANKER_BASE_URL" <<'PY'
+python3 - "$CONFIG_JSON" "$DATABASE_URL" "$EMBED_MODEL" "$EMBED_DIMS" "$CHAT_MODEL" "$RERANKER_MODEL" <<'PY'
 import json, sys
-path, db_url, embed, dims, chat, reranker, reranker_base = sys.argv[1:8]
+path, db_url, embed, dims, chat, reranker = sys.argv[1:7]
 try:
     cfg = json.load(open(path))
 except Exception:
@@ -93,8 +93,6 @@ cfg.update({
 })
 cfg.setdefault("schema_pack", "gbrain-base-v2")
 cfg.setdefault("mcp", {"publish_skills": True})
-pbu = cfg.setdefault("provider_base_urls", {})
-pbu["llama-server-reranker"] = reranker_base
 json.dump(cfg, open(path, "w"), indent=2)
 print(f"[vm-setup] wrote {path}")
 PY
