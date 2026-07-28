@@ -54,7 +54,13 @@ command -v gbrain >/dev/null || log "gbrain not on PATH yet — installing…"
 # --- 1. Install / upgrade gbrain ------------------------------------------------
 GBRAIN_PKG="${GBRAIN_PKG:-github:rspur-hq/gbrain}"
 log "installing gbrain from $GBRAIN_PKG"
+# Pitfall: if upstream gbrain (github:garrytan/gbrain) is already installed
+# globally, bun's global resolver reports a bogus "DependencyLoop" on the
+# same-name fork package. Removing the old global first avoids it.
+bun remove -g gbrain 2>/dev/null || true
 bun install -g "$GBRAIN_PKG" || log "already installed / upgrade skipped (continuing)"
+# Bun blocks postinstall hooks by default — trust explicitly (runs migrations).
+bun pm -g trust gbrain 2>/dev/null || true
 command -v gbrain >/dev/null || fail "gbrain still not on PATH after install"
 
 # --- 2. File-plane config.json --------------------------------------------------

@@ -119,6 +119,15 @@ Doctor can be green while a model id is subtly wrong (typos pass config
 validation). Smoke-test the real path: `gbrain put_page` a test note, run
 extract, confirm takes land in the DB, and run a search with reranker on.
 
+### 7. Fork install: bun "DependencyLoop" on same-name package
+Switching a VM from upstream (`github:garrytan/gbrain`) to a fork
+(`github:rspur-hq/gbrain`) with `bun install -g` fails with a bogus
+`DependencyLoop` — bun's global resolver trips on the same package name from
+two sources. Fix: `bun remove -g gbrain` first, then install, then
+`bun pm -g trust gbrain` so the postinstall (migrations) actually runs.
+Also note `gbrain --version` reads `package.json`, not the `VERSION` file —
+keep them in sync or version checks lie.
+
 ## Verification checklist (the 100/100 state)
 
 - [ ] `gbrain doctor` — all categories 100
