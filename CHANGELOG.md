@@ -22746,3 +22746,12 @@ Thank you to everyone who reported bugs, submitted fixes, and helped make GBrain
 - 6 fat markdown skills: ingest, query, maintain, enrich, briefing, migrate
 - ClawHub manifest for skill distribution
 - Full design docs: GBRAIN_V0 spec, pluggable engine architecture, SQLite engine plan
+
+## [0.42.69.0] - 2026-07-28
+
+### Added
+- conversation-parser: `email-headers` builtin pattern — email ingest pages
+  (From:/To:/Date:/Subject: header blocks) now parse as conversations.
+  Closes the fleet gap where email-type pages matched NO builtin pattern
+  (every chat platform had one; email did not). Found via RE Reset fleet
+  deploy: doctor conversation_format_coverage warned on every email-heavy box.

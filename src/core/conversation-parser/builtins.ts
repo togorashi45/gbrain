@@ -377,6 +377,39 @@ export const BUILTIN_PATTERNS: readonly PatternEntry[] = [
   },
 
   {
+    id: 'email-headers',
+    origin: 'builtin',
+    // Email ingest shape: a `From:` header line opens the message; To:/Date:/
+    // Subject: and the body are absorbed via multi_line. One email = one
+    // message from the sender. Closes the fleet gap where email-type pages
+    // (Gmail/Composio ingests) matched NO builtin pattern — every chat
+    // platform had a pattern, email did not.
+    regex: /^From:\s+(.+?)(?:\s*<[^>\n]*>)?\s*$/,
+    captures: {
+      speaker_group: 1,
+      text_group: 0, // text comes from following lines (multi_line)
+    },
+    date_source: 'frontmatter',
+    time_format: '24h',
+    timezone_policy: 'utc_assumed_with_warn',
+    multi_line: true,
+    quick_reject: /^From:\s/,
+    score_full_body: true,
+    test_positive: [
+      'From: Alex Example <alex@example.com>',
+      'From: Notification Bot',
+      'From: RightSignature.com',
+    ],
+    test_negative: [
+      'To: someone@example.com',
+      'From the balcony we watched the sunset',
+      'Re: From earlier correspondence',
+    ],
+    source_doc:
+      'Email ingest shape (Gmail/Composio/Apple Mail collectors): From:/To:/Date:/Subject: header block, body follows',
+  },
+
+  {
     id: 'telegram-text-export',
     origin: 'builtin',
     // Telegram Desktop's text-export shape: `Alice Doe, [Mar 15, 2024 at 6:37:00 PM]`
