@@ -106,6 +106,9 @@ PY
 log "mirroring model config into DB plane"
 GBRAIN_HOME="$GBRAIN_HOME" gbrain config set models.chat "$CHAT_MODEL"           || log "WARN: models.chat set failed"
 GBRAIN_HOME="$GBRAIN_HOME" gbrain config set models.tier.reasoning "$CHAT_MODEL" || log "WARN: models.tier.reasoning set failed"
+# extract_atoms defaults to anthropic:haiku — provider_failure on OpenRouter-only
+# brains (Atomic pitfall, 2026-07-28). Point it at the same OpenRouter chat model.
+GBRAIN_HOME="$GBRAIN_HOME" gbrain config set models.dream.extract_atoms "$CHAT_MODEL" || log "WARN: models.dream.extract_atoms set failed"
 GBRAIN_HOME="$GBRAIN_HOME" gbrain config set search.reranker.enabled true        || log "WARN: reranker.enabled set failed"
 GBRAIN_HOME="$GBRAIN_HOME" gbrain config set search.reranker.model "$RERANKER_MODEL" || log "WARN: reranker.model set failed"
 
