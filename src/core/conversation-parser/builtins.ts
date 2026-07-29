@@ -342,7 +342,9 @@ export const BUILTIN_PATTERNS: readonly PatternEntry[] = [
     origin: 'builtin',
     // Matches: **Speaker Name:** message text  (colon INSIDE bold,
     // speaker must not start with `[` — see lookahead rationale above).
-    regex: /^\*\*(?!\[)(.+?):\*\*\s*(.*)$/,
+    // Optional markdown list-bullet prefix (`- **Name:** …`) — Slack/CRM
+    // collectors that emit bullet lists of messages (fleet: Jeremiah box).
+    regex: /^(?:[-*]\s+)?\*\*(?!\[)(.+?):\*\*\s*(.*)$/,
     captures: {
       speaker_group: 1,
       text_group: 2,
@@ -351,12 +353,14 @@ export const BUILTIN_PATTERNS: readonly PatternEntry[] = [
     time_format: '24h',
     timezone_policy: 'utc_assumed_with_warn',
     multi_line: false,
-    quick_reject: /^\*\*/,
+    quick_reject: /^(?:[-*]\s+)?\*\*/,
     score_full_body: true,
     test_positive: [
       '**Alice Example:** Okay, start on.',
       '**Participant 2:** he tried to reset it remotely the other night.',
       '**Bob Example:** That is exactly right.',
+      '- **Rachel Recca:** *AC Issue:* found the breaker tripped.',
+      '- **Matt Hoover:** sounds good, proceed.',
     ],
     test_negative: [
       // bold-paren-time shape (colon OUTSIDE bold) MUST fall through:
@@ -384,7 +388,7 @@ export const BUILTIN_PATTERNS: readonly PatternEntry[] = [
     // message from the sender. Closes the fleet gap where email-type pages
     // (Gmail/Composio ingests) matched NO builtin pattern — every chat
     // platform had a pattern, email did not.
-    regex: /^From:\s+(.+?)(?:\s*<[^>\n]*>)?\s*$/,
+    regex: /^(?:[-*]\s+)?From:\s+(.+?)(?:\s*<[^>\n]*>)?\s*$/,
     captures: {
       speaker_group: 1,
       text_group: 0, // text comes from following lines (multi_line)
@@ -393,12 +397,13 @@ export const BUILTIN_PATTERNS: readonly PatternEntry[] = [
     time_format: '24h',
     timezone_policy: 'utc_assumed_with_warn',
     multi_line: true,
-    quick_reject: /^From:\s/,
+    quick_reject: /^(?:[-*]\s+)?From:\s/,
     score_full_body: true,
     test_positive: [
       'From: Alex Example <alex@example.com>',
       'From: Notification Bot',
       'From: RightSignature.com',
+      '- From: Zillow <recommendations@mail.zillow.com>',
     ],
     test_negative: [
       'To: someone@example.com',

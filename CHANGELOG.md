@@ -22755,3 +22755,11 @@ Thank you to everyone who reported bugs, submitted fixes, and helped make GBrain
   Closes the fleet gap where email-type pages matched NO builtin pattern
   (every chat platform had one; email did not). Found via RE Reset fleet
   deploy: doctor conversation_format_coverage warned on every email-heavy box.
+
+## [0.42.70.0] - 2026-07-28
+
+### Fixed
+- conversation-parser: `bold-name-no-time` and `email-headers` now accept an
+  optional markdown list-bullet prefix (`- **Name:** …`, `- From: …`) —
+  Slack/CRM collectors that emit bullet lists of messages parsed as no_match
+  (fleet: Jeremiah box, 67% no_match → parses 3 messages/page).
