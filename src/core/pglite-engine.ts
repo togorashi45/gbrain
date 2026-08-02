@@ -4608,30 +4608,24 @@ export class PGLiteEngine implements BrainEngine {
     if (rowsIn.length === 0) return 0;
     // v0.42.26: wrap in batchRetry to match links/timeline (takes was the only
     // batch primitive without retry resilience).
-    return this.batchRetry(opts?.auditSite ?? 'addTakesBatch', opts?.signal, () => this._addTakesBatchOnce(rowsIn), rowsIn.length);
+    return this.batchRetry(opts?.auditSite ?? 'addTakesBatch', opts?.signal, () => this._addTakesBatchOnce(rowsIn, opts?.conflict ?? 'update'), rowsIn.length);
   }
 
-  private async _addTakesBatchOnce(rowsIn: TakeBatchInput[]): Promise<number> {
+  private async _addTakesBatchOnce(rowsIn: TakeBatchInput[], conflict: 'update' | 'insert' = 'update'): Promise<number> {
     // #1861: JSONB jsonb_to_recordset instead of unnest(${arr}::text[]). Mirrors
     // PostgresEngine: `claim` is free LLM prose (array-literal crash hazard);
     // native recordset types + JSON-native numbers/booleans retire the per-engine
     // element-type casts. Weight clamp/round + NUL strip live in buildTakeRows.
     // ON CONFLICT DO UPDATE — intra-batch dup (page_id, row_num) errors, same as
-    // the pre-#1861 unnest path.
+    // the pre-#1861 unnest path. conflict='insert' switches to DO NOTHING so a
+    // create-a-new-take writer can never overwrite a live row (see BatchOpts).
     const { rows, weightClamped } = buildTakeRows(rowsIn);
     if (weightClamped > 0) {
       process.stderr.write(`[takes] TAKES_WEIGHT_CLAMPED: ${weightClamped} row(s) had weight outside [0,1]; clamped\n`);
     }
-    const result = await executeRawJsonb(
-      this,
-      `INSERT INTO takes (page_id, row_num, claim, kind, holder, weight, since_date, until_date, source, superseded_by, active)
-       SELECT v.page_id, v.row_num, v.claim, v.kind, v.holder, v.weight,
-              v.since_date, v.until_date, v.source, v.superseded_by, v.active
-       FROM jsonb_to_recordset(($1::jsonb)->'rows') AS v(
-         page_id int, row_num int, claim text, kind text, holder text, weight real,
-         since_date text, until_date text, source text, superseded_by int, active boolean
-       )
-       ON CONFLICT (page_id, row_num) DO UPDATE SET
+    const onConflict = conflict === 'insert'
+      ? `ON CONFLICT (page_id, row_num) DO NOTHING`
+      : `ON CONFLICT (page_id, row_num) DO UPDATE SET
          claim         = EXCLUDED.claim,
          kind          = EXCLUDED.kind,
          holder        = EXCLUDED.holder,
@@ -4641,7 +4635,17 @@ export class PGLiteEngine implements BrainEngine {
          source        = EXCLUDED.source,
          superseded_by = EXCLUDED.superseded_by,
          active        = EXCLUDED.active,
-         updated_at    = now()
+         updated_at    = now()`;
+    const result = await executeRawJsonb(
+      this,
+      `INSERT INTO takes (page_id, row_num, claim, kind, holder, weight, since_date, until_date, source, superseded_by, active)
+       SELECT v.page_id, v.row_num, v.claim, v.kind, v.holder, v.weight,
+              v.since_date, v.until_date, v.source, v.superseded_by, v.active
+       FROM jsonb_to_recordset(($1::jsonb)->'rows') AS v(
+         page_id int, row_num int, claim text, kind text, holder text, weight real,
+         since_date text, until_date text, source text, superseded_by int, active boolean
+       )
+       ${onConflict}
        RETURNING 1`,
       [],
       [{ rows }],
