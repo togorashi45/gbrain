@@ -1,7 +1,8 @@
 name: Release
 
 # Publishes a GitHub release for every VERSION bump that lands on master:
-# tag + title `v<VERSION>`, notes from that version's CHANGELOG.md entry,
+# tag + title `v<VERSION><FORK_TAG_SUFFIX>`, notes from that version's
+# CHANGELOG.md entry,
 # compiled binaries attached (#3521).
 #
 # Why every bump: `gbrain check-update` resolves the latest version from the
@@ -28,6 +29,17 @@ on:
 permissions:
   contents: read
 
+env:
+  # Fork tag scheme. Bare vX.Y.Z.W is reserved for unmodified upstream content.
+  # Every tag this workflow mints carries the fork suffix, so a force tag fetch
+  # from upstream can never overwrite a pointer to one of our releases.
+  #
+  # The suffix lives HERE and in the git tag only. VERSION and package.json stay
+  # plain numeric: VERSION_RE in src/core/semver.ts accepts a numeric dotted
+  # string and nothing else, and parseSemver returning null takes down
+  # check-update, upgrade drift, and self-upgrade --check-only for the fleet.
+  FORK_TAG_SUFFIX: "-rspur.1"
+
 concurrency:
   group: release
   cancel-in-progress: false
@@ -37,6 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
       exists: ${{ steps.v.outputs.exists }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
@@ -47,14 +60,17 @@ jobs:
         run: |
           version="$(tr -d '[:space:]' < VERSION)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Fork tag name. VERSION stays numeric; the suffix is added only here.
+          tag="v${version}${FORK_TAG_SUFFIX}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
           # Complete = release exists AND carries every asset the self-updater
           # can request. A partial release must NOT short-circuit, so a re-run
           # can repair it.
-          assets="$(gh release view "v$version" --repo "$GITHUB_REPOSITORY" \
+          assets="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
             --json assets --jq '[.assets[].name] | sort | join(",")' 2>/dev/null || true)"
           if [ "$assets" = "gbrain-darwin-arm64,gbrain-linux-x64" ]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Release v$version already published with all assets — nothing to do."
+            echo "Release $tag already published with all assets, nothing to do."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
@@ -129,8 +145,8 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
-          tag_name: v${{ needs.version.outputs.version }}
-          name: v${{ needs.version.outputs.version }}
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ${{ needs.version.outputs.tag }}
           target_commitish: ${{ github.sha }}
           body_path: /tmp/release-notes.md
           fail_on_unmatched_files: true

@@ -25,6 +25,12 @@ happens, so that is where the suffix belongs. The release number `0.42.72.2` is
 one past upstream's highest (`0.42.72.1`), so it does not shadow an existing
 upstream release either.
 
+The release workflow owns the tag name. `.github/workflows/release.yml` mints
+`v<VERSION><FORK_TAG_SUFFIX>` on every VERSION bump that lands on master, so
+nobody has to remember the suffix by hand. Before this, the workflow tagged
+bare `v<VERSION>` straight from the file and quietly created exactly the
+collision the scheme is meant to prevent.
+
 Retagged, old tags removed only after the new ones were verified on the remote:
 
 | Was | Now | Commit |

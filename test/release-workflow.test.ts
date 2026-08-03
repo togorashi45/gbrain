@@ -44,9 +44,14 @@ describe('release.yml ↔ binary-self-update asset contract', () => {
     expect(WORKFLOW).toContain([...EXPECTED_ASSETS].sort().join(','));
   });
 
-  test('release tag derives from the VERSION file, v-prefixed', () => {
+  test('release tag derives from the VERSION file, v-prefixed, fork-suffixed', () => {
     expect(WORKFLOW).toContain('< VERSION');
-    expect(WORKFLOW).toMatch(/tag_name: v\$\{\{ needs\.version\.outputs\.version \}\}/);
+    // Fork scheme: bare vX.Y.Z.W is reserved for unmodified upstream content,
+    // so the tag the workflow mints is v<VERSION><FORK_TAG_SUFFIX>. VERSION
+    // itself stays numeric because semver.ts VERSION_RE rejects a suffix.
+    expect(WORKFLOW).toMatch(/FORK_TAG_SUFFIX: "-rspur\.\d+"/);
+    expect(WORKFLOW).toContain('tag="v${version}${FORK_TAG_SUFFIX}"');
+    expect(WORKFLOW).toMatch(/tag_name: \$\{\{ needs\.version\.outputs\.tag \}\}/);
   });
 
   test('missing binaries fail the release instead of publishing assetless', () => {
