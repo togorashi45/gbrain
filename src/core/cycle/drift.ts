@@ -24,6 +24,7 @@
 
 import type { BrainEngine } from '../engine.ts';
 import { BudgetMeter } from './budget-meter.ts';
+import { DRIFT_BAND_MIN_WEIGHT, DRIFT_BAND_MAX_WEIGHT, weightGte, weightLte } from '../takes-weight-sql.ts';
 import { resolveModel } from '../model-config.ts';
 import type { DreamPhaseResult } from './auto-think.ts';
 
@@ -195,7 +196,7 @@ async function findDriftCandidates(
     FROM takes t
     JOIN pages p ON p.id = t.page_id
     WHERE t.active
-      AND t.weight >= 0.3 AND t.weight <= 0.85
+      AND ${weightGte('t.weight', DRIFT_BAND_MIN_WEIGHT)} AND ${weightLte('t.weight', DRIFT_BAND_MAX_WEIGHT)}
       AND t.resolved_at IS NULL
     ORDER BY recent_evidence DESC, t.weight DESC
     LIMIT 200

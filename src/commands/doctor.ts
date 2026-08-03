@@ -1,5 +1,6 @@
 import type { BrainEngine } from '../core/engine.ts';
 import { REPAIR_SOURCE_CONFIG_SQL } from '../core/source-config-sql.ts';
+import { HIGH_CONVICTION_WEIGHT, weightGte } from '../core/takes-weight-sql.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import * as db from '../core/db.ts';
 import { LATEST_VERSION, getIdleBlockers } from '../core/migrate.ts';
@@ -1343,9 +1344,15 @@ export async function checkAbandonedThreads(engine: BrainEngine): Promise<Check>
          WHERE active = true
            AND resolved_at IS NULL
            AND superseded_by IS NULL
-           AND weight >= 0.7
+           AND ${weightGte('weight', HIGH_CONVICTION_WEIGHT)}
            AND since_date IS NOT NULL
-           AND since_date::date < (now() - INTERVAL '12 months')`,
+           -- since_date is TEXT and takes add --since YYYY-MM writes it at
+           -- month precision. A bare '2020-01'::date raises "invalid input
+           -- syntax for type date", which turned this whole check into a warn
+           -- on any brain with a month-precision take. Normalize to the 1st
+           -- first, same as the serve-http abandoned-threads query.
+           AND (since_date || CASE WHEN length(since_date) = 7 THEN '-01' ELSE '' END)::date
+               < (now() - INTERVAL '12 months')`,
     );
     const count = rows[0]?.count ?? 0;
     if (count === 0) {

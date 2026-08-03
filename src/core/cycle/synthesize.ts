@@ -46,10 +46,15 @@ import type { Page, PageType } from '../types.ts';
 import { validateSourceId } from '../utils.ts';
 import { safeSplitIndex } from '../text-safe.ts';
 import { PAGE_SLUG_SEG } from '../cjk.ts';
+import { dreamSummaryFrontmatter, ensureDreamSummaryExemption } from './dream-summary-frontmatter.ts';
 
 // Slug grammar from validatePageSlug — shared via PAGE_SLUG_SEG (#738).
 // Used for the orchestrator-written summary index slug.
 const SUMMARY_SLUG_RE = new RegExp(`^${PAGE_SLUG_SEG}(\\/${PAGE_SLUG_SEG})*$`);
+
+// Dream-summary frontmatter is constructed in ONE place, shared by the
+// orchestrator's writeSummaryPage and by the provenance stamp that covers
+// subagent-authored summary pages. See dream-summary-frontmatter.ts.
 
 // ── Model context budget (D1, D5, D7, D9) ─────────────────────────────
 
@@ -1376,7 +1381,9 @@ function findLegacyCompletion(
  * engine method). Best-effort per row: a stamp failure never kills the
  * phase (the render-time override still covers the file).
  */
-async function stampDreamProvenance(
+// Exported for test/dream-summary-frontmatter.test.ts, which drives the real
+// stamp against a real engine rather than re-implementing the UPDATE.
+export async function stampDreamProvenance(
   engine: BrainEngine,
   refs: Array<{ slug: string; source_id: string; raw_source?: string }>,
   cycleDate: string,
@@ -1394,11 +1401,17 @@ async function stampDreamProvenance(
         // #1978 raw-source persistence: record the transcript path the
         // synthesis was derived from, so `gbrain doctor` (raw_provenance
         // check) can verify every generated page carries a raw trace.
-        [{
+        // A synthesize child may write a `dream-cycle-summaries/*` slug
+        // itself (that prefix is in the dream_synthesize_paths allow-list),
+        // in which case THIS stamp is the only frontmatter the row ever
+        // gets. Route it through ensureDreamSummaryExemption so such a page
+        // carries the same exemption the orchestrator's own summary write
+        // stamps. No-op for every other slug.
+        [ensureDreamSummaryExemption(slug, {
           dream_generated: true,
           dream_cycle_date: cycleDate,
           ...(raw_source ? { raw_source } : {}),
-        }],
+        })],
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -1468,7 +1481,8 @@ export function renderPageToMarkdown(page: Page, tags: string[]): string {
 
 // ── Summary index page ───────────────────────────────────────────────
 
-async function writeSummaryPage(
+// Exported so the summary write can be asserted directly (writer 1 of two).
+export async function writeSummaryPage(
   engine: BrainEngine,
   brainDir: string,
   summarySlug: string,
@@ -1499,16 +1513,10 @@ async function writeSummaryPage(
   // Stamp the dream-output identity marker into the summary's frontmatter.
   // parseMarkdown below round-trips it into the DB-stored frontmatter, so the
   // marker survives any later reverse-render of the summary page.
+  // Writer 1 of two. The key set lives in dream-summary-frontmatter.ts so it
+  // cannot drift from what the subagent put_page path gets stamped with.
   const fullMarkdown = serializeMarkdown(
-    {
-      dream_generated: true,
-      dream_cycle_date: summaryDate,
-      // #1978: deterministic index page — no source document of its own;
-      // raw traces live on the listed pages. Explicit exemption keeps the
-      // doctor raw_provenance check quiet.
-      raw_trace_exempt: true,
-      raw_trace_exempt_reason: 'deterministic dream-cycle index; raw traces live on listed pages',
-    } as Record<string, unknown>,
+    dreamSummaryFrontmatter(summaryDate),
     body,
     '',
     { type: 'note' as string, title: `Dream cycle ${summaryDate}`, tags: ['dream-cycle'] },

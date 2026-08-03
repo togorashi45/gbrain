@@ -17,6 +17,7 @@ import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import { randomBytes, createHash } from 'crypto';
 import { safeHexEqual } from '../core/timing-safe.ts';
+import { HIGH_CONVICTION_WEIGHT, weightGte } from '../core/takes-weight-sql.ts';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -1390,7 +1391,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
           `SELECT t.id, p.slug AS page_slug, t.claim, t.weight, t.since_date
              FROM takes t JOIN pages p ON p.id = t.page_id
              WHERE t.active = true AND t.resolved_at IS NULL AND t.superseded_by IS NULL
-               AND t.weight >= 0.7
+               AND ${weightGte('t.weight', HIGH_CONVICTION_WEIGHT)}
                AND (t.since_date || CASE WHEN length(t.since_date) = 7 THEN '-01' ELSE '' END)::date
                    < (now() - INTERVAL '12 months')
              ORDER BY t.since_date ASC
