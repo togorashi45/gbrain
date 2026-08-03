@@ -155,6 +155,67 @@ describe('findMisroutedPages — heuristic correctness', () => {
     expect(result.walk_truncated).toBe(false);
   });
 
+  test('case 8: shared local_path between default and a source is NOT flagged as drift', async () => {
+    // Real fleet shape (Jake's box): sources `default` and `slack` both
+    // point local_path at the SAME tree, `/opt/brain/vault`. The two
+    // sources are isolated by tag, not by directory. A plain FS walk over
+    // that shared tree sees every file, including default-only admin
+    // pages (cron logs, backups, extract indexes), and would flag every
+    // one of them as "present at default, missing from slack" — a false
+    // positive, not a real misroute.
+    const root = makeTmpRoot('case8');
+    seedFile(root, 'cron/brain-ingest/2026-08-03-run.md');
+    seedFile(root, 'backups/export/schema.md');
+    seedFile(root, 'extracts/index.md');
+
+    await runSources(engine, ['add', 'src-case8', '--no-federated']);
+    await engine.executeRaw(
+      `UPDATE sources SET local_path = $1 WHERE id = $2`,
+      [root, 'src-case8'],
+    );
+    // These pages are correctly source_id=default admin content. None of
+    // them belongs to src-case8; src-case8 never wrote them.
+    await engine.putPage('cron/brain-ingest/2026-08-03-run', { type: 'log', title: 'cron', compiled_truth: '.' });
+    await engine.putPage('backups/export/schema', { type: 'log', title: 'backup', compiled_truth: '.' });
+    await engine.putPage('extracts/index', { type: 'log', title: 'extracts', compiled_truth: '.' });
+
+    // Pass BOTH the 'default' entry (same local_path) and src-case8, the
+    // way doctor.ts now does — this is what lets the check detect sharing.
+    const result = await findMisroutedPages(engine, [
+      { id: 'default', local_path: root },
+      { id: 'src-case8', local_path: root },
+    ]);
+
+    expect(result.count).toBe(0);
+    expect(result.sample).toEqual([]);
+    expect(result.skipped_shared_path.length).toBe(1);
+    expect(result.skipped_shared_path[0].source_id).toBe('src-case8');
+    expect(result.skipped_shared_path[0].shared_with).toEqual(['default']);
+  });
+
+  test('case 9: distinct local_paths still detect real drift (check keeps its value)', async () => {
+    // Sanity: the shared-path skip must not swallow genuine multi-source
+    // drift when the paths really are distinct.
+    const root = makeTmpRoot('case9');
+    seedFile(root, 'people/erin.md');
+
+    await runSources(engine, ['add', 'src-case9', '--no-federated']);
+    await engine.executeRaw(
+      `UPDATE sources SET local_path = $1 WHERE id = $2`,
+      [root, 'src-case9'],
+    );
+    await engine.putPage('people/erin', { type: 'person', title: 'Erin', compiled_truth: '.' });
+
+    const result = await findMisroutedPages(engine, [
+      { id: 'default', local_path: '/opt/brain/vault-default-only' },
+      { id: 'src-case9', local_path: root },
+    ]);
+
+    expect(result.skipped_shared_path).toEqual([]);
+    expect(result.count).toBe(1);
+    expect(result.sample[0].slug).toBe('people/erin');
+  });
+
   test('case 7 (OV13): .mdx files are walked alongside .md', async () => {
     const root = makeTmpRoot('case7');
     seedFile(root, 'topics/mdx-page.mdx');

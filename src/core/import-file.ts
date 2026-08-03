@@ -17,7 +17,7 @@ import { logSlugFallback } from './audit-slug-fallback.ts';
 import { resolveContextualRetrievalMode } from './contextual-retrieval-resolver.ts';
 import { assessContentSanity, ContentSanityBlockError } from './content-sanity.ts';
 import { loadOperatorLiterals } from './content-sanity-literals.ts';
-import { logContentSanityAssessment } from './audit/content-sanity-audit.ts';
+import { logContentSanityAssessment, resolveAuditSourceId } from './audit/content-sanity-audit.ts';
 import { isEmbedSkipped, buildEmbedSkipMarker, EMBED_SKIP_KEY } from './embed-skip.ts';
 import {
   QUARANTINE_KEY,
@@ -434,7 +434,7 @@ export async function importFromContent(
       // explicitly opted into the bypass and gets noisy feedback every
       // time it fires so they remember the gate is off. Audit as a
       // bypass (page lands regardless).
-      logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
+      logContentSanityAssessment(slug, await resolveAuditSourceId(engine, slug, sourceId), sanityResult, {
         bypass: true,
       });
       if (sanityResult.shouldQuarantine || sanityResult.shouldFlag) {
@@ -457,7 +457,7 @@ export async function importFromContent(
         // classifyErrorCode bins it. Existing exception flow at every
         // wrapper site (import errors counter, put_page MCP envelope,
         // sync failure record) fires through this single throw point.
-        logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
+        logContentSanityAssessment(slug, await resolveAuditSourceId(engine, slug, sourceId), sanityResult, {
           disposition: 'reject',
         });
         throw new ContentSanityBlockError(sanityResult);
@@ -470,7 +470,7 @@ export async function importFromContent(
         bytes: sanityResult.bytes,
       });
       pageQuarantined = true;
-      logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
+      logContentSanityAssessment(slug, await resolveAuditSourceId(engine, slug, sourceId), sanityResult, {
         disposition: 'quarantine',
       });
       process.stderr.write(
@@ -491,7 +491,7 @@ export async function importFromContent(
         // Oversize also skips embedding (existing embed_skip marker). The
         // chunking guard below honors it; tx.deleteChunks purges old chunks.
         parsed.frontmatter[EMBED_SKIP_KEY] = buildEmbedSkipMarker(sanityResult.bytes);
-        logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
+        logContentSanityAssessment(slug, await resolveAuditSourceId(engine, slug, sourceId), sanityResult, {
           disposition: 'soft_block',
         });
         process.stderr.write(
@@ -500,7 +500,7 @@ export async function importFromContent(
       } else {
         // markup_heavy: page ingests NORMALLY (keeps chunks, embeds). The
         // content_flag marker rides along for the agent warning.
-        logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
+        logContentSanityAssessment(slug, await resolveAuditSourceId(engine, slug, sourceId), sanityResult, {
           disposition: 'flag',
         });
         process.stderr.write(
@@ -509,7 +509,7 @@ export async function importFromContent(
       }
     } else if (sanityResult.reasons.includes('oversize_warn')) {
       // Warn tier: page lands normally; lint surface picks up too.
-      logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
+      logContentSanityAssessment(slug, await resolveAuditSourceId(engine, slug, sourceId), sanityResult, {
         disposition: 'warn',
       });
       process.stderr.write(

@@ -47,12 +47,29 @@ export interface MisroutedSample {
   local_path: string;
 }
 
+/**
+ * A source the walk skipped because its `local_path` is shared with another
+ * configured source. Two sources isolated by tag on one filesystem tree
+ * (Jake's box: `default` and `slack` both point at `/opt/brain/vault`) do
+ * not have separate content on disk. A walk in that shape sees every file
+ * in the tree, including pages that genuinely belong to the other source,
+ * and would flag all of them as misrouted. That is not evidence of
+ * anything; it is an artifact of the shared path.
+ */
+export interface SkippedSharedPath {
+  source_id: string;
+  local_path: string;
+  shared_with: string[];
+}
+
 export interface MisroutedResult {
   /** True when the FS walk hit the limit/timeout and the result is partial. */
   walk_truncated: boolean;
   /** Per-source breakdown: slugs that appear at (default, slug) but NOT at (X, slug). */
   count: number;
   sample: MisroutedSample[];
+  /** Sources whose local_path is shared with another source; not walked. */
+  skipped_shared_path: SkippedSharedPath[];
 }
 
 const DEFAULT_FILE_LIMIT = 10_000;
@@ -177,6 +194,12 @@ async function batchProbeExistence(
  * For each non-default source with a configured local_path, walk the
  * filesystem and cross-check against the DB.
  *
+ * Callers should pass every configured source that has a local_path,
+ * including 'default', not just the non-default ones. That is what lets
+ * this function detect the shared-path case below; without the 'default'
+ * entry it cannot tell a shared tree from a source-specific one, and the
+ * check degrades back into the original false-positive shape.
+ *
  * @returns aggregated MisroutedResult across all checked sources. The sample
  *          array is bounded at 5 entries so the doctor message stays scannable.
  */
@@ -192,6 +215,20 @@ export async function findMisroutedPages(
   let totalCount = 0;
   let walkTruncated = false;
   const sample: MisroutedSample[] = [];
+  const skippedSharedPath: SkippedSharedPath[] = [];
+
+  // Map local_path -> every source id configured at that path, across ALL
+  // sources the caller handed us (including 'default'). A source whose
+  // path appears more than once in this map is sharing a filesystem tree
+  // with another source; content there is isolated by tag, not by
+  // directory, so a plain FS walk cannot attribute files to it.
+  const pathToSourceIds = new Map<string, string[]>();
+  for (const s of sources) {
+    if (!s.local_path) continue;
+    const ids = pathToSourceIds.get(s.local_path) ?? [];
+    ids.push(s.id);
+    pathToSourceIds.set(s.local_path, ids);
+  }
 
   for (const src of sources) {
     if (src.id === 'default') continue;
@@ -199,6 +236,11 @@ export async function findMisroutedPages(
     if (Date.now() >= deadlineMs) {
       walkTruncated = true;
       break;
+    }
+    const sharers = (pathToSourceIds.get(src.local_path) ?? []).filter(id => id !== src.id);
+    if (sharers.length > 0) {
+      skippedSharedPath.push({ source_id: src.id, local_path: src.local_path, shared_with: sharers });
+      continue;
     }
     const { files, truncated } = walkMarkdownAndMdxFiles(src.local_path, limit, deadlineMs);
     if (truncated) walkTruncated = true;
@@ -223,5 +265,5 @@ export async function findMisroutedPages(
     }
   }
 
-  return { walk_truncated: walkTruncated, count: totalCount, sample };
+  return { walk_truncated: walkTruncated, count: totalCount, sample, skipped_shared_path: skippedSharedPath };
 }

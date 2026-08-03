@@ -37,6 +37,7 @@
 
 import { createAuditWriter, computeIsoWeekFilename } from './audit-writer.ts';
 import type { ContentSanityResult } from '../content-sanity.ts';
+import type { BrainEngine } from '../engine.ts';
 
 export type ContentSanityEventType =
   | 'hard_block'   // legacy alias for the reject path (pre-v0.42)
@@ -111,6 +112,46 @@ function classifyEventType(
 }
 
 /**
+ * Resolve which source a content-sanity audit event should be attributed
+ * to. Bug (fleet finding, Jake's box, D8/D17): several boxes give two
+ * sources the SAME `local_path` (e.g. `default` and `slack` both point at
+ * `/opt/brain/vault`, isolated by tag rather than by directory). When a
+ * non-default source syncs, it walks that whole shared tree, including
+ * files it never wrote (cron logs, backups, extract indexes that already
+ * belong to `default`). If the caller's `sourceId` is trusted blindly,
+ * every one of those re-touches gets logged under the walking source,
+ * even though the content is not that source's.
+ *
+ * The correct attribution is the page's ACTUAL current owner when one
+ * already exists. If the slug has no row yet under `requestedSourceId`
+ * but does have one under a different source, that other source is the
+ * honest answer. If no row exists anywhere, the requested source is the
+ * only candidate and stays as-is (this is a genuinely new page).
+ *
+ * Best-effort: any DB error here must not block the ingest gate or the
+ * audit write, so a failure just falls back to the requested source.
+ */
+export async function resolveAuditSourceId(
+  engine: BrainEngine,
+  slug: string,
+  requestedSourceId: string | undefined,
+): Promise<string> {
+  const requested = requestedSourceId ?? 'default';
+  if (requested === 'default') return requested; // default has nothing else to defer to
+  try {
+    const atRequested = await engine.getPage(slug, { sourceId: requested });
+    if (atRequested) return requested; // page really does live at the requested source
+    const anyExisting = await engine.getPage(slug);
+    if (anyExisting?.source_id && anyExisting.source_id !== requested) {
+      return anyExisting.source_id;
+    }
+  } catch {
+    // Best-effort; attribution should never crash the ingest gate.
+  }
+  return requested;
+}
+
+/**
  * Append a content-sanity assessment event. Called from the ingest
  * gate before any branch on the assessment result — every assessment
  * that does something user-visible gets recorded.
@@ -166,6 +207,14 @@ export function readRecentContentSanityEvents(
  *  shape so doctor can format consistently. */
 export interface ContentSanitySummary {
   total_events: number;
+  /**
+   * Count of DISTINCT slugs across all events (fleet bug 2). A source that
+   * re-walks its full local_path every sync cycle re-logs the SAME pages
+   * repeatedly; `total_events` grows with cron frequency alone and is not
+   * evidence of anything by itself. `distinct_pages` is the number that
+   * actually says how many pages are affected.
+   */
+  distinct_pages: number;
   by_type: {
     hard_block: number;
     quarantine: number;
@@ -192,10 +241,12 @@ export function summarizeContentSanityEvents(
   };
   const by_source: Record<string, number> = {};
   const patternCounts: Record<string, number> = {};
+  const distinctSlugs = new Set<string>();
 
   for (const ev of events) {
     by_type[ev.event_type]++;
     by_source[ev.source_id] = (by_source[ev.source_id] ?? 0) + 1;
+    distinctSlugs.add(ev.slug);
     for (const name of ev.junk_pattern_matches) {
       patternCounts[name] = (patternCounts[name] ?? 0) + 1;
     }
@@ -210,6 +261,7 @@ export function summarizeContentSanityEvents(
 
   return {
     total_events: events.length,
+    distinct_pages: distinctSlugs.size,
     by_type,
     by_source,
     top_patterns,

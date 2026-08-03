@@ -308,6 +308,50 @@ export const BUILTIN_PATTERNS: readonly PatternEntry[] = [
   },
 
   {
+    // Fleet bug 4 (v0.42.72+): Granola's raw two-party call export marks
+    // turns with literal `Them:` / `Me:` labels. No bold markers, no
+    // per-line timestamp, and (crucially) no line break between turns in
+    // the raw JSON blob gbrain ingests. `normalize-inline-turns.ts` runs
+    // BEFORE this pattern is scored and splits those inline turns onto
+    // their own lines; this pattern then matches each resulting line.
+    //
+    // Deliberately narrow: matches ONLY the literal words "Them" or "Me"
+    // as the entire speaker label (case-sensitive, whole match anchored
+    // start-to-colon). Unlike `speaker-letter-no-time`'s open `Speaker
+    // [A-Z0-9]+` shape, a bare `Word:` pattern that accepted ANY label
+    // would false-match ordinary prose ("Note:", "Important:"). "Them:"
+    // and "Me:" as sentence-opening labels are not common prose idioms,
+    // so no score_full_body guard is needed here (mirrors
+    // speaker-letter-no-time's posture, which has the same narrowness
+    // argument for "Speaker A:").
+    id: 'granola-inline-me-them',
+    origin: 'builtin',
+    regex: /^(Them|Me):\s*(.*)$/,
+    captures: {
+      speaker_group: 1,
+      text_group: 2,
+    },
+    date_source: 'frontmatter',
+    time_format: '24h',
+    timezone_policy: 'utc_assumed_with_warn',
+    multi_line: false,
+    quick_reject: /^(?:Them|Me):/,
+    test_positive: [
+      'Them: So the renewal is coming up next month.',
+      'Me: Right, I saw that on the calendar.',
+      'Them: We should get ahead of it this time.',
+    ],
+    test_negative: [
+      'Theme: dark mode toggle',
+      'Meta: v2 release notes',
+      'Speaker A: not this pattern',
+      'Someone said "them" and "me" in this sentence.',
+    ],
+    source_doc:
+      'Granola two-party call export: raw JSON blob with inline `Them:`/`Me:` speaker tags, split onto lines by normalize-inline-turns.ts before scoring',
+  },
+
+  {
     // Modern meeting-transcription tools (Circleback, Granola, Zoom)
     // emit `**Speaker Name:** message text` with NO per-line
     // timestamp. Every other built-in requires a time anchor, so this

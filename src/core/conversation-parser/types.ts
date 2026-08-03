@@ -30,6 +30,24 @@
 import type { Page } from '../types.ts';
 
 /**
+ * Page types the doctor `conversation_format_coverage` check samples
+ * and scores against the built-in conversation patterns (fleet bug 4).
+ *
+ * `email` was dropped from this list on purpose. An email page is a
+ * SINGLE message, just From, Date, and a body. It is never a multi-turn
+ * log. No built-in pattern, nor any plausible one, can match a lone
+ * message against a conversation-turn shape, so including `email`
+ * guarantees a permanent no-match floor unrelated to whether the parser
+ * actually works. That is not evidence of anything; it is a structural
+ * mismatch between the check and the content it's checking. Email
+ * quality is a job for a different check, or none at all: a single
+ * message doesn't need a conversation-turn parser.
+ */
+export const CONVERSATION_FORMAT_COVERAGE_TYPES = [
+  'conversation', 'meeting', 'slack', 'imessage', 'imessage-daily',
+] as const;
+
+/**
  * Parsed message after orchestrator runs. Matches the existing
  * `ConversationMessage` shape from extract-conversation-facts.ts so
  * downstream callers don't need adapter code.

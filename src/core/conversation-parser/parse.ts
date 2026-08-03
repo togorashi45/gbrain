@@ -30,6 +30,7 @@ import {
   cleanSpeaker,
 } from './builtins.ts';
 import { normalizeBlockConversation } from './normalize-block.ts';
+import { normalizeInlineTurnConversation } from './normalize-inline-turns.ts';
 import type {
   DateContext,
   MatchedMessage,
@@ -479,6 +480,12 @@ export function parseConversation(
   // single-line shape the built-in patterns recognize. Strict no-op when no
   // block header is present, so already-canonical content is untouched.
   body = normalizeBlockConversation(body);
+
+  // Pre-pass: split Granola-style inline "Them:"/"Me:" turns (a single
+  // paragraph, no line break between turns) onto their own lines so the
+  // line-anchored `granola-inline-me-them` built-in can match them.
+  // Strict no-op unless the shape is present (fleet bug 4).
+  body = normalizeInlineTurnConversation(body);
 
   const dateCtx = deriveDateContext(opts);
 
