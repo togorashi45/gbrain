@@ -225,4 +225,41 @@ describe('summarizeContentSanityEvents', () => {
     expect(s.top_patterns).toContainEqual({ name: 'reddit_blocked', count: 2 });
     expect(s.top_patterns).toContainEqual({ name: 'linkedin_wall', count: 1 });
   });
+
+  test(
+    'distinct_pages counts unique slugs, NOT raw event volume (fleet bug 2 — ' +
+    'a re-walked shared local_path logs the SAME few pages over and over, ' +
+    'four times a day; the event count grows with cron frequency, the page ' +
+    'count does not)',
+    () => {
+      // 3 real pages, each re-logged 4x (one per sync cycle that day).
+      const events = [
+        event({ slug: 'backups/export/schema' }),
+        event({ slug: 'backups/export/schema' }),
+        event({ slug: 'backups/export/schema' }),
+        event({ slug: 'backups/export/schema' }),
+        event({ slug: 'apple/notes/snapshot' }),
+        event({ slug: 'apple/notes/snapshot' }),
+        event({ slug: 'apple/notes/snapshot' }),
+        event({ slug: 'apple/notes/snapshot' }),
+        event({ slug: 'apple/contacts/snapshot' }),
+        event({ slug: 'apple/contacts/snapshot' }),
+        event({ slug: 'apple/contacts/snapshot' }),
+        event({ slug: 'apple/contacts/snapshot' }),
+      ];
+      const s = summarizeContentSanityEvents(events);
+      expect(s.total_events).toBe(12);
+      // The real signal: 3 affected pages, not 12 events.
+      expect(s.distinct_pages).toBe(3);
+    },
+  );
+
+  test('distinct_pages counts a slug once even across different event types', () => {
+    const s = summarizeContentSanityEvents([
+      event({ slug: 'a', event_type: 'warn' }),
+      event({ slug: 'a', event_type: 'flag' }),
+      event({ slug: 'b', event_type: 'warn' }),
+    ]);
+    expect(s.distinct_pages).toBe(2);
+  });
 });

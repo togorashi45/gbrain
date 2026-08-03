@@ -389,3 +389,61 @@ describe('importFromContent — normal pages unaffected', () => {
     });
   });
 });
+
+describe('content-sanity audit attribution — shared local_path (D8/D17 bug 2)', () => {
+  test(
+    'a page already owned by default, re-touched by a sync running as ' +
+    'another source, logs its content-sanity event under the TRUE owner ' +
+    '(default) — not under the source that happened to be walking it',
+    async () => {
+      await withIsolatedHome(async () => {
+        const { runSources } = await import('../src/commands/sources.ts');
+        const { readRecentContentSanityEvents } = await import('../src/core/audit/content-sanity-audit.ts');
+        await runSources(engine, ['add', 'slack', '--no-federated']);
+
+        // Jake's box shape: 'default' and 'slack' share one local_path.
+        // 'default' already owns this page (e.g. a cron-ingest log).
+        const bigBody = 'a'.repeat(100_000); // warn tier: > bytes_warn, < bytes_block
+        const content = FRONTMATTER + bigBody;
+        await importFromContent(engine, 'cron/brain-ingest/run', content, { noEmbed: true });
+
+        // slack's sync walks the same shared tree on its own cadence and
+        // reprocesses the SAME file, even though it never wrote it.
+        await importFromContent(engine, 'cron/brain-ingest/run', content, {
+          noEmbed: true,
+          sourceId: 'slack',
+        });
+
+        const events = readRecentContentSanityEvents(7).filter(
+          e => e.slug === 'cron/brain-ingest/run',
+        );
+        expect(events.length).toBeGreaterThan(0);
+        for (const ev of events) {
+          expect(ev.source_id).toBe('default');
+        }
+      });
+    },
+  );
+
+  test('a page genuinely new to a source still attributes to that source', async () => {
+    await withIsolatedHome(async () => {
+      const { runSources } = await import('../src/commands/sources.ts');
+      const { readRecentContentSanityEvents } = await import('../src/core/audit/content-sanity-audit.ts');
+      await runSources(engine, ['add', 'slack', '--no-federated']);
+
+      const content = FRONTMATTER + 'a'.repeat(100_000);
+      await importFromContent(engine, 'slack/genuinely-new', content, {
+        noEmbed: true,
+        sourceId: 'slack',
+      });
+
+      const events = readRecentContentSanityEvents(7).filter(
+        e => e.slug === 'slack/genuinely-new',
+      );
+      expect(events.length).toBeGreaterThan(0);
+      for (const ev of events) {
+        expect(ev.source_id).toBe('slack');
+      }
+    });
+  });
+});

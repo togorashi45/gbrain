@@ -453,32 +453,100 @@ export async function checkPackUpgradeAvailable(
 }
 
 /**
- * type_proliferation (D16): pack-aware ratio. Warns when distinct typed
- * pages exceed pack-declared types + 5; fails at declared × 2. No false
- * positives on custom packs (compares to actual pack declaration count,
- * not a hardcoded threshold).
+ * type_proliferation (D16, fixed fleet bug 3): pack-aware, ALIAS-aware.
+ *
+ * Pre-fix, this compared `COUNT(DISTINCT type)` against the pack's
+ * declared-NAME count alone and never consulted `page_types[].aliases`.
+ * A canonical type absorbing several alias labels (e.g. `person`
+ * declaring `aliases: [researcher, engineer, writer, ...]`) inflated the
+ * distinct-type count with values the pack fully recognizes, producing a
+ * warning with zero genuine gap. It could also swing the other way and
+ * miss a real gap when the DB happened to have few distinct types overall.
+ *
+ * Fix: resolve every distinct `pages.type` value against the SAME alias
+ * graph the rest of the pack system uses (`buildAliasGraph` from
+ * `schema-pack/closure.ts`, the real type resolver's node set: every
+ * declared `name:` plus every declared `aliases:` entry, transitively
+ * unioned across the pack). Only values that resolve via NEITHER a name
+ * NOR an alias count as unresolved. The check now reports on unresolved
+ * types specifically, naming them, instead of a raw distinct-count ratio
+ * that can't tell resolved variety from a genuine gap.
  */
 export async function checkTypeProliferation(
   engine: BrainEngine,
 ): Promise<OnboardCheckResult> {
   let declared = 15;  // fallback to gbrain-base-v2 default if pack unavailable
+  let knownTypeNames: ReadonlySet<string> | null = null;
   try {
     const { loadActivePack } = await import('../schema-pack/load-active.ts');
     const { loadConfigFileOnly } = await import('../config.ts');
+    const { buildAliasGraph } = await import('../schema-pack/closure.ts');
     let dbConfig: string | undefined;
     try {
       dbConfig = (await engine.getConfig('schema_pack')) ?? undefined;
     } catch { /* tolerate pre-config brains */ }
     const active = await loadActivePack({ cfg: loadConfigFileOnly(), remote: false, dbConfig })
       .catch(() => null);
-    if (active) declared = active.manifest.page_types.length;
+    if (active) {
+      declared = active.manifest.page_types.length;
+      // buildAliasGraph's node set is every declared `name:` PLUS every
+      // string that appears in any `aliases:` array. That is exactly
+      // "resolves via a declared name or a declared alias." Reused, not
+      // reimplemented, so this stays in lockstep with the real resolver
+      // (query closure) if that ever changes shape.
+      knownTypeNames = new Set(buildAliasGraph(active.manifest).keys());
+    }
   } catch {
-    // Use fallback.
+    // Use fallback; knownTypeNames stays null (no alias-aware resolution
+    // possible), same posture as the pre-fix code when the pack load fails.
   }
-  const n = await safeCount(
-    engine,
-    `SELECT COUNT(DISTINCT type) AS count FROM pages WHERE deleted_at IS NULL AND type IS NOT NULL`,
-  );
+
+  const distinctRows = await engine.executeRaw<{ type: string }>(
+    `SELECT DISTINCT type FROM pages WHERE deleted_at IS NULL AND type IS NOT NULL`,
+  ).catch(() => [] as { type: string }[]);
+  const distinctTypes = distinctRows.map(r => r.type);
+  const n = distinctTypes.length;
+
+  const unresolved = knownTypeNames
+    ? distinctTypes.filter(t => !knownTypeNames!.has(t))
+    : []; // no pack loaded → can't resolve anything → fall back to count-only below
+
+  if (knownTypeNames) {
+    if (unresolved.length === 0) {
+      return {
+        check: {
+          name: 'type_proliferation',
+          status: 'ok',
+          message: `${n} distinct typed values, all resolve via a declared name or alias (pack declares ${declared} names).`,
+        },
+        remediations: [],
+      };
+    }
+    const sample = unresolved.slice(0, 10).sort();
+    const sampleStr = sample.join(', ') + (unresolved.length > sample.length ? ', ...' : '');
+    // Any unresolved type is a real gap worth surfacing (warn). Fail is
+    // reserved for the severe case, more unresolved types than TWICE
+    // what the pack declares. This mirrors the pre-fix fail threshold's
+    // scale, now measured against the precise signal instead of raw
+    // distinct-count noise.
+    const status: 'warn' | 'fail' = unresolved.length > declared * 2 ? 'fail' : 'warn';
+    return {
+      check: {
+        name: 'type_proliferation',
+        status,
+        message:
+          `${unresolved.length} distinct page type(s) resolve via NEITHER a declared name NOR a declared ` +
+          `alias (of ${n} distinct types total, pack declares ${declared} names): ${sampleStr}. ` +
+          `Run \`gbrain onboard --check --explain\` to preview a pack upgrade ` +
+          `or define a custom pack with mapping_rules.`,
+      },
+      remediations: [],  // pack_upgrade_available check emits the actionable step
+    };
+  }
+
+  // Fallback posture (pack failed to load): pre-fix count-only behavior,
+  // so a broken pack load degrades to the old signal rather than going
+  // silent.
   const warn = declared + 5;
   const fail = declared * 2;
   if (n > fail) {
@@ -487,11 +555,11 @@ export async function checkTypeProliferation(
         name: 'type_proliferation',
         status: 'fail',
         message:
-          `${n} distinct page types (pack declares ${declared}). ` +
+          `${n} distinct page types (pack declares ${declared}; pack load failed, alias-aware check skipped). ` +
           `Run \`gbrain onboard --check --explain\` to preview a pack upgrade ` +
           `or define a custom pack with mapping_rules.`,
       },
-      remediations: [],  // pack_upgrade_available check emits the actionable step
+      remediations: [],
     };
   }
   if (n > warn) {
@@ -499,7 +567,7 @@ export async function checkTypeProliferation(
       check: {
         name: 'type_proliferation',
         status: 'warn',
-        message: `${n} distinct page types vs ${declared} declared in pack — consider unification.`,
+        message: `${n} distinct page types vs ${declared} declared in pack (pack load failed, alias-aware check skipped); consider unification.`,
       },
       remediations: [],
     };

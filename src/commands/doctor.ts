@@ -822,10 +822,12 @@ export async function doctorReportRemote(engine: BrainEngine): Promise<DoctorRep
     );
     const nonDefaultWithPath = sources.filter(s => s.id !== 'default' && s.local_path);
     if (sources.length > 1 && nonDefaultWithPath.length > 0) {
-      const result = await findMisroutedPages(
-        engine,
-        nonDefaultWithPath.map(s => ({ id: s.id, local_path: s.local_path as string })),
-      );
+      // Include 'default' so the check can tell a shared filesystem tree
+      // apart from a source-specific one (see multi-source-drift.ts).
+      const withPath = sources
+        .filter(s => s.local_path)
+        .map(s => ({ id: s.id, local_path: s.local_path as string }));
+      const result = await findMisroutedPages(engine, withPath);
       if (result.walk_truncated) {
         checks.push({
           name: 'multi_source_drift',
@@ -841,6 +843,12 @@ export async function doctorReportRemote(engine: BrainEngine): Promise<DoctorRep
             `${result.count} page slug(s) appear at 'default' but NOT at the intended source ` +
             `(e.g., ${sampleStr}). Likely pre-v0.30.3 misroutes OR an incomplete initial sync. ` +
             `Verify on the brain host: \`gbrain sources status\` then \`gbrain sync --source <id> --full\`.`,
+        });
+      } else if (result.skipped_shared_path.length > 0) {
+        checks.push({
+          name: 'multi_source_drift',
+          status: 'ok',
+          message: sharedPathSkipAdvice(result.skipped_shared_path),
         });
       } else {
         checks.push({
@@ -5566,7 +5574,13 @@ export async function buildChecks(
     try {
       const { readConversationBodyForParsing } = await import('../core/conversation-parser/body.ts');
       const { parseConversation } = await import('../core/conversation-parser/parse.ts');
-      const allowedTypes = ['conversation', 'meeting', 'slack', 'email', 'imessage', 'imessage-daily'] as const;
+      const { CONVERSATION_FORMAT_COVERAGE_TYPES } = await import('../core/conversation-parser/types.ts');
+      // 'email' dropped (fleet bug 4): a single message can never match
+      // a multi-turn conversation pattern, so including it guaranteed a
+      // permanent no-match floor unrelated to parser quality. See
+      // CONVERSATION_FORMAT_COVERAGE_TYPES's doc comment for the full
+      // reasoning.
+      const allowedTypes = CONVERSATION_FORMAT_COVERAGE_TYPES;
       // PageFilters supports singular `type` only; iterate the allowed types
       // and cap at ~50/each to land at ~200 total max.
       const sample: import('../core/types.ts').Page[] = [];
@@ -5769,10 +5783,14 @@ export async function buildChecks(
     );
     const nonDefaultWithPath = sources.filter(s => s.id !== 'default' && s.local_path);
     if (sources.length > 1 && nonDefaultWithPath.length > 0) {
-      const result = await findMisroutedPages(
-        engine!,
-        nonDefaultWithPath.map(s => ({ id: s.id, local_path: s.local_path as string })),
-      );
+      // Pass EVERY source with a local_path, including 'default'. The
+      // check needs the 'default' entry to detect the shared-tree case:
+      // a non-default source pointed at the same local_path as default,
+      // isolated by tag rather than by directory. See multi-source-drift.ts.
+      const withPath = sources
+        .filter(s => s.local_path)
+        .map(s => ({ id: s.id, local_path: s.local_path as string }));
+      const result = await findMisroutedPages(engine!, withPath);
       if (result.walk_truncated) {
         checks.push({
           name: 'multi_source_drift',
@@ -5787,6 +5805,12 @@ export async function buildChecks(
           name: 'multi_source_drift',
           status: 'warn',
           message: multiSourceDriftAdvice(result.count, sampleStr),
+        });
+      } else if (result.skipped_shared_path.length > 0) {
+        checks.push({
+          name: 'multi_source_drift',
+          status: 'ok',
+          message: sharedPathSkipAdvice(result.skipped_shared_path),
         });
       } else {
         checks.push({
@@ -7061,13 +7085,19 @@ export async function buildChecks(
       const hardBlocked =
         summary.by_type.hard_block + summary.by_type.reject + summary.by_type.quarantine;
       const softBlocked = summary.by_type.soft_block + summary.by_type.flag;
+      // Fleet bug 2: a source that re-walks its full local_path every sync
+      // cycle re-logs the SAME few pages over and over. `events.length`
+      // grows purely with cron frequency and is not evidence of anything
+      // by itself; `distinct_pages` is what actually says how much content
+      // is affected. Gate the volume tier on distinct pages, not raw events.
       const status: 'ok' | 'warn' | 'fail' =
         hardBlocked > 0 ? 'fail' :
-          (softBlocked > 0 || events.length >= 10) ? 'warn' : 'ok';
+          (softBlocked > 0 || summary.distinct_pages >= 10) ? 'warn' : 'ok';
       checks.push({
         name: 'content_sanity_audit_recent',
         status,
-        message: `${events.length} events (hard=${hardBlocked} [hard_block=${summary.by_type.hard_block} reject=${summary.by_type.reject} quarantine=${summary.by_type.quarantine}] soft=${softBlocked} [soft_block=${summary.by_type.soft_block} flag=${summary.by_type.flag}] warn=${summary.by_type.warn})${topPatterns ? ', patterns: ' + topPatterns : ''}${topSources ? ', sources: ' + topSources : ''}. (Local audit only — multi-host operators set GBRAIN_AUDIT_DIR.)`,
+        message: `${summary.distinct_pages} distinct page(s) affected (${events.length} events); ` +
+          `hard=${hardBlocked} [hard_block=${summary.by_type.hard_block} reject=${summary.by_type.reject} quarantine=${summary.by_type.quarantine}] soft=${softBlocked} [soft_block=${summary.by_type.soft_block} flag=${summary.by_type.flag}] warn=${summary.by_type.warn}${topPatterns ? ', patterns: ' + topPatterns : ''}${topSources ? ', sources: ' + topSources : ''}. (Local audit only, multi-host operators set GBRAIN_AUDIT_DIR.)`,
       });
     }
   } catch (err) {
@@ -8652,11 +8682,30 @@ async function checkSchemaPackSourceDrift(engine: BrainEngine): Promise<Check> {
 }
 
 /**
+ * Message for the shared-`local_path` case in multi_source_drift. Sources
+ * isolated by tag on one directory tree, not by separate directories,
+ * can't be walked and compared file by file, so the check skips them
+ * honestly instead of flagging every file in the shared tree as a false
+ * misroute.
+ */
+export function sharedPathSkipAdvice(skipped: { source_id: string; shared_with: string[] }[]): string {
+  const skippedStr = skipped
+    .map(s => `${s.source_id} (shares local_path with ${s.shared_with.join(', ')})`)
+    .join(', ');
+  return (
+    `No cross-source slug drift detected. Filesystem check skipped for: ${skippedStr}. ` +
+    `These sources share one local_path with another source, isolated by tag rather than ` +
+    `directory. A filesystem walk cannot tell which files belong to which source there, ` +
+    `so this check has nothing reliable to compare for them.`
+  );
+}
+
+/**
  * #1123 — multi_source_drift remediation advice. Exported so the regression
  * test can pin that it only references CLI surfaces that actually exist
  * (the pre-fix text pointed at 'gbrain sources rehome', which was never
  * built, and at 'gbrain delete <slug>' without explaining that delete
- * targets the ACTIVE source — following it literally on a multi-source
+ * targets the ACTIVE source, so following it literally on a multi-source
  * brain deletes the correctly-routed row).
  */
 export function multiSourceDriftAdvice(count: number, sampleStr: string): string {

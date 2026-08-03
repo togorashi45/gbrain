@@ -18,7 +18,10 @@ import {
 } from '../src/core/onboard/checks.ts';
 import { toOnboardRecommendation } from '../src/core/onboard/render.ts';
 import { _resetPackCacheForTests } from '../src/core/schema-pack/registry.ts';
-import { _resetPackLocatorForTests } from '../src/core/schema-pack/load-active.ts';
+import {
+  _resetPackLocatorForTests,
+  __setPackLocatorForTests,
+} from '../src/core/schema-pack/load-active.ts';
 
 let engine: PGLiteEngine;
 
@@ -131,6 +134,139 @@ describe('checkTypeProliferation (D16 pack-aware ratio)', () => {
       expect(result.check.status).toBe('warn');
       expect(result.check.message).toMatch(new RegExp(`${seedCount} distinct`));
     });
+  });
+
+  it(
+    'does NOT false-positive when every "extra" distinct type is a declared ' +
+    'ALIAS, not a primary name (fleet bug 3 — Jake\'s box: 60 live types, ' +
+    'zero genuine gaps, all resolve via name or alias)',
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'gbrain-alias-pack-'));
+      try {
+        const dir = join(home, 'schema-packs', 'alias-test');
+        mkdirSync(dir, { recursive: true });
+        const path = join(dir, 'pack.yaml');
+        // Declared page_types.length = 3 (note, meeting, person). person
+        // declares 6 aliases — none of those alias strings is itself a
+        // `name:` in this pack, matching real-world alias usage (a
+        // canonical type absorbing several legacy/synonym labels).
+        const body = `api_version: gbrain-schema-pack-v1
+name: alias-test
+version: 1.0.0
+description: ""
+gbrain_min_version: 0.38.0
+extends: null
+borrow_from: []
+page_types:
+  - name: note
+    primitive: concept
+    path_prefixes: []
+    aliases: []
+    extractable: false
+    expert_routing: false
+  - name: meeting
+    primitive: temporal
+    path_prefixes: []
+    aliases: []
+    extractable: false
+    expert_routing: false
+  - name: person
+    primitive: entity
+    path_prefixes: []
+    aliases:
+      - researcher
+      - engineer
+      - writer
+      - coach
+      - investor
+      - founder
+    extractable: false
+    expert_routing: false
+link_types: []
+frontmatter_links: []
+takes_kinds:
+  - fact
+  - take
+  - bet
+  - hunch
+enrichable_types: []
+filing_rules: []
+`;
+        writeFileSync(path, body, 'utf-8');
+        __setPackLocatorForTests((name) => (name === 'alias-test' ? path : null));
+
+        await withEnv({ GBRAIN_HOME: home, GBRAIN_SCHEMA_PACK: 'alias-test' }, async () => {
+          // declared = 3. Old code: n distinct DB types compared to
+          // declared+5=8 with NO alias awareness. Seed 9 distinct types —
+          // 'note', 'meeting', 'person' (primary names) plus 6 alias
+          // values. Every single one resolves via a declared name or a
+          // declared alias; there is no genuine gap.
+          await seedPages([
+            'note', 'meeting', 'person',
+            'researcher', 'engineer', 'writer', 'coach', 'investor', 'founder',
+          ]);
+          const result = await checkTypeProliferation(engine);
+          expect(result.check.status).toBe('ok');
+        });
+      } finally {
+        _resetPackLocatorForTests();
+      }
+    },
+  );
+
+  it('still fails/warns on genuinely unresolved types when aliases ARE present (check keeps its value)', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-alias-pack-gap-'));
+    try {
+      const dir = join(home, 'schema-packs', 'alias-test-gap');
+      mkdirSync(dir, { recursive: true });
+      const path = join(dir, 'pack.yaml');
+      const body = `api_version: gbrain-schema-pack-v1
+name: alias-test-gap
+version: 1.0.0
+description: ""
+gbrain_min_version: 0.38.0
+extends: null
+borrow_from: []
+page_types:
+  - name: note
+    primitive: concept
+    path_prefixes: []
+    aliases: []
+    extractable: false
+    expert_routing: false
+  - name: person
+    primitive: entity
+    path_prefixes: []
+    aliases:
+      - researcher
+    extractable: false
+    expert_routing: false
+link_types: []
+frontmatter_links: []
+takes_kinds:
+  - fact
+  - take
+  - bet
+  - hunch
+enrichable_types: []
+filing_rules: []
+`;
+      writeFileSync(path, body, 'utf-8');
+      __setPackLocatorForTests((name) => (name === 'alias-test-gap' ? path : null));
+
+      await withEnv({ GBRAIN_HOME: home, GBRAIN_SCHEMA_PACK: 'alias-test-gap' }, async () => {
+        // 'researcher' resolves via alias (no gap). 'totally-unknown-type'
+        // does NOT resolve via any declared name or alias — a REAL gap
+        // that the check must still catch.
+        await seedPages(['note', 'person', 'researcher', 'totally-unknown-type']);
+        const result = await checkTypeProliferation(engine);
+        expect(result.check.status).not.toBe('ok');
+        expect(result.check.message).toContain('totally-unknown-type');
+        expect(result.check.message).not.toContain('researcher');
+      });
+    } finally {
+      _resetPackLocatorForTests();
+    }
   });
 });
 
