@@ -71,7 +71,7 @@ mcp_servers:
       GBRAIN_HOME: /opt/brain
 ```
 
-Expected result: ~102 gbrain tools in Hermes (`gbrain put_page`, `get_page`, …).
+Expected result: ~102 gbrain tools in Hermes (MCP tool names, e.g. `put_page`, `get_page`, …).
 
 ---
 
@@ -116,7 +116,7 @@ upgrade, delete it if the entries reference versions you no longer run.
 
 ### 6. Verify with live data, not just doctor
 Doctor can be green while a model id is subtly wrong (typos pass config
-validation). Smoke-test the real path: `gbrain put_page` a test note, run
+validation). Smoke-test the real path: `gbrain put` a test note, run
 extract, confirm takes land in the DB, and run a search with reranker on.
 
 ### 7. Fork install: bun "DependencyLoop" on same-name package
