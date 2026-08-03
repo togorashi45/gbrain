@@ -14,6 +14,17 @@ Fork releases are tagged `vX.Y.Z.W-rspur.N` from here on. Bare `vX.Y.Z.W` is
 reserved for unmodified upstream content. The old bare fork tags collided with
 upstream releases carrying different content, so if upstream were ever added as
 a remote a force tag fetch would silently overwrite our own release pointers.
+
+The suffix lives in the GIT TAG only. `package.json` version and the `VERSION`
+file stay plain numeric (`0.42.72.2`), because `VERSION_RE` in
+`src/core/semver.ts` accepts only a numeric dotted string and `parseSemver`
+returns null on anything else. A suffixed version field takes down
+`check-update`, `runUpgradeDriftCheck`, and `self-upgrade --check-only` for the
+whole fleet (15 tests prove it). The tag name is where the collision actually
+happens, so that is where the suffix belongs. The release number `0.42.72.2` is
+one past upstream's highest (`0.42.72.1`), so it does not shadow an existing
+upstream release either.
+
 Retagged, old tags removed only after the new ones were verified on the remote:
 
 | Was | Now | Commit |

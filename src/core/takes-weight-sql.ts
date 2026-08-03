@@ -23,7 +23,7 @@
  *
  * NOTE ON HISTORY: commit e92bfd4d's message claims this was already fixed.
  * It was not. Both known sites still carried the bare literal until
- * v0.42.72.2-rspur.1.
+ * v0.42.72.2-rspur.1 (this release).
  */
 
 /** Conviction floor for "high-conviction take". */
