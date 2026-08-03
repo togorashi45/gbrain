@@ -40,6 +40,12 @@
 // Budget: $0.30/source/run, key `cycle.extract_atoms.budget_usd`.
 // Exceeded budget halts with PhaseStatus='warn' + partial result.
 //
+// Page-length floor: 500 chars default, key
+// `cycle.extract_atoms.min_page_chars` (see
+// DEFAULT_MIN_PAGE_CHARS_FOR_EXTRACTION). Read per call in
+// discoverExtractablePages AND countExtractAtomsBacklog so the phase and the
+// doctor backlog count can never disagree on eligibility.
+//
 // Source-scoped: opts.sourceId routes the per-source corpus dir lookup,
 // the discovery SQL (source_id = $1), the NOT EXISTS idempotency
 // subquery (atom.source_id = $1), AND every putPage write
@@ -84,7 +90,55 @@ const LEGACY_EXTRACTABLE_TYPES = [
 const SYNTHESIS_OUTPUT_TYPES = new Set<string>(['atom', 'concept']);
 
 const PAGE_DISCOVERY_BUDGET = 50;
-const MIN_PAGE_CHARS_FOR_EXTRACTION = 500;
+
+/**
+ * Minimum `compiled_truth` length for a brain page to enter atom extraction.
+ *
+ * Was a hardcoded 500. Now a DB-plane tunable, key
+ * `cycle.extract_atoms.min_page_chars`, so a brain whose corpus skews short
+ * (dense notes, chat logs) can be tuned to its own material with
+ * `gbrain config set` instead of a redeploy. Default is unchanged at 500, so
+ * an unconfigured brain behaves exactly as before.
+ *
+ * COST WARNING: this floor is the primary lever on how many pages the phase
+ * feeds to the LLM. Lowering it is retroactive with no backfill — pages
+ * previously below the floor were never scanned, so they carry no
+ * `atoms_scan_hash` and no atom row, and they re-enter discovery on the very
+ * next cycle. `PAGE_DISCOVERY_BUDGET` (50/run) and the per-run budget cap
+ * (`cycle.extract_atoms.budget_usd`) are what keep that drain paced.
+ *
+ * Scope: brain pages only. Transcript FILES are discovered by
+ * `discoverTranscripts`, which has its own independent `minChars` floor
+ * (default 2000, see transcript-discovery.ts) that this key deliberately does
+ * not touch.
+ */
+const DEFAULT_MIN_PAGE_CHARS_FOR_EXTRACTION = 500;
+const MIN_PAGE_CHARS_CONFIG_KEY = 'cycle.extract_atoms.min_page_chars';
+
+/**
+ * Read the page-length floor from the DB config plane, falling back to the
+ * default. Mirrors the `cycle.extract_atoms.budget_usd` read in
+ * `runPhaseExtractAtoms`: coerce, accept only a finite positive number,
+ * fail-soft to the default on any error so a bad value can never wedge
+ * discovery or the doctor backlog count.
+ *
+ * Exported for unit tests.
+ */
+export async function resolveMinPageChars(
+  engine: Pick<BrainEngine, 'getConfig'>,
+): Promise<number> {
+  try {
+    const configured = await engine.getConfig(MIN_PAGE_CHARS_CONFIG_KEY);
+    if (configured) {
+      const n = Number(configured);
+      if (Number.isFinite(n) && n > 0) return Math.floor(n);
+    }
+  } catch {
+    // Keep the safe default.
+  }
+  return DEFAULT_MIN_PAGE_CHARS_FOR_EXTRACTION;
+}
+
 // Source pages whose frontmatter declares a `raw` payload pointer hold raw
 // import data, not extractable prose. Extraction on them yields zero atoms,
 // so no atom row is ever written and they re-enter discovery + the doctor
@@ -272,7 +326,7 @@ export async function discoverExtractablePages(
   const params: unknown[] = [
     sourceId,
     await resolveExtractableTypes(),
-    MIN_PAGE_CHARS_FOR_EXTRACTION,
+    await resolveMinPageChars(engine),
     PAGE_DISCOVERY_BUDGET,
   ];
   if (hasFilter) params.push(affectedSlugs);
@@ -353,9 +407,10 @@ export async function countExtractAtomsBacklog(
                AND atom.deleted_at IS NULL
            )`;
     const extractableTypes = await resolveExtractableTypes();
+    const minPageChars = await resolveMinPageChars(engine);
     const params = scoped
-      ? [sourceId, extractableTypes, MIN_PAGE_CHARS_FOR_EXTRACTION]
-      : [extractableTypes, MIN_PAGE_CHARS_FOR_EXTRACTION];
+      ? [sourceId, extractableTypes, minPageChars]
+      : [extractableTypes, minPageChars];
     const rows = await engine.executeRaw<{ cnt: string | number }>(sql, params);
     return Number(rows[0]?.cnt ?? 0);
   } catch (err) {

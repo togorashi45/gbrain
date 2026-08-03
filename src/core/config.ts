@@ -989,6 +989,10 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'models.dream.synthesize',
   'models.dream.extract_atoms',
   'cycle.extract_atoms.budget_usd',
+  // Minimum page length (chars of compiled_truth) to enter atom extraction.
+  // Default 500. Lowering it is retroactive on the next cycle and increases
+  // LLM spend; pace with cycle.extract_atoms.budget_usd.
+  'cycle.extract_atoms.min_page_chars',
   'models.dream.patterns',
   'models.dream.synthesize_verdict',
   'models.drift',
