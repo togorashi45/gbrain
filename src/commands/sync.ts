@@ -5614,35 +5614,27 @@ export function manageGitignore(
 
 /**
  * v0.42.7 (#1696): one-line end-of-sync nudge when the brain (or a source)
- * carries a meaningful link/timeline extraction backlog. Reuses the same warn
- * threshold (GBRAIN_EXTRACTION_LAG_WARN_PCT, default 20%) the doctor check uses
- * so the nudge fires iff doctor would warn — one source of truth. Always
- * stderr (never stdout — keeps `--json` clean), suppressible via
+ * carries a meaningful link/timeline extraction backlog. Calls the SAME
+ * `computeExtractionLagSignal` the doctor check uses (dynamic import keeps
+ * doctor.ts off sync's eager-load path) so "the nudge fires iff doctor would
+ * warn" holds by construction — one function, not two independent copies of
+ * the warn predicate. Fleet finding (atomic + jeremiah boxes) is why this
+ * matters: the raw stale% used to fire the nudge on pages that were fully
+ * scanned and genuinely had nothing to extract, sending the operator to run
+ * `extract --stale` for a guaranteed no-op. computeExtractionLagSignal's
+ * content pre-scan is what fixes that on both surfaces at once.
+ *
+ * Always stderr (never stdout — keeps `--json` clean), suppressible via
  * GBRAIN_SYNC_NO_EXTRACT_NUDGE, best-effort (never throws). Source-prefix-aware
  * via serr when called inside a withSourcePrefix scope.
  */
 async function maybeExtractionNudge(engine: BrainEngine, sourceId?: string): Promise<void> {
   if (process.env.GBRAIN_SYNC_NO_EXTRACT_NUDGE) return;
   try {
-    const { LINK_EXTRACTOR_VERSION_TS } = await import('../core/link-extraction.ts');
-    // D3/C4: resolve the warn threshold + vacuous-skip floor through the SAME
-    // helpers the doctor check uses (dynamic import keeps doctor.ts off sync's
-    // eager-load path) so "the nudge fires iff doctor would warn" can't drift.
-    const { _resolveEnvNumber, EXTRACTION_LAG_WARN_PCT_DEFAULT, EXTRACTION_LAG_MIN_PAGES } = await import('./doctor.ts');
-    const totalRows = await engine.executeRaw<{ count: number }>(
-      sourceId
-        ? `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND source_id = $1`
-        : `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL`,
-      sourceId ? [sourceId] : [],
-    );
-    const total = Number(totalRows[0]?.count ?? 0);
-    // Match doctor's predicate EXACTLY (C4): skip tiny brains only when NOT
-    // source-scoped (a small explicit source IS assessed, like orphan_ratio).
-    if (total < EXTRACTION_LAG_MIN_PAGES && !sourceId) return;
-    const stale = await engine.countStalePagesForExtraction({ sourceId, versionTs: LINK_EXTRACTOR_VERSION_TS });
-    const warnPct = _resolveEnvNumber('GBRAIN_EXTRACTION_LAG_WARN_PCT', EXTRACTION_LAG_WARN_PCT_DEFAULT, { unit: '%' });
-    if ((stale / total) * 100 > warnPct) {
-      serr(`[sync] ${stale} page(s) have un-extracted edges — run 'gbrain extract --stale'`);
+    const { computeExtractionLagSignal } = await import('./doctor.ts');
+    const sig = await computeExtractionLagSignal(engine, { sourceId });
+    if (sig && sig.wouldWarn) {
+      serr(`[sync] ${sig.estimatedExtractable} page(s) have un-extracted links/timeline entries — run 'gbrain extract --stale'`);
     }
   } catch { /* nudge is best-effort — never block sync on it */ }
 }

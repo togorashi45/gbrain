@@ -2,6 +2,7 @@ import { describe, expect, test, beforeAll, afterAll, beforeEach, afterEach } fr
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, symlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import matterParse from 'gray-matter';
 import {
   autoFixFrontmatter,
   writeBrainPage,
@@ -158,6 +159,86 @@ describe('autoFixFrontmatter', () => {
     const { content, fixes } = autoFixFrontmatter(input);
     expect(content).toBe(input);
     expect(fixes).toEqual([]);
+  });
+
+  // Real-world fleet finding: an unquoted title containing "key: value"-shaped
+  // text breaks the YAML parser because a plain scalar can't contain ": ".
+  // These are the two failure strings observed on the fleet (crm/deals boxes).
+  describe('YAML_PARSE (colon-in-scalar)', () => {
+    test('quotes a plain title containing "Deal: 123 Main St"', () => {
+      const input = `${fence}\ntype: concept\ntitle: Deal: 123 Main St\n${fence}\n\nbody`;
+      const { content, fixes } = autoFixFrontmatter(input);
+      expect(fixes.some(f => f.code === 'YAML_PARSE')).toBe(true);
+      expect(content).toContain(`title: 'Deal: 123 Main St'`);
+      // Result must now actually parse as YAML.
+      expect(() => matterParse(content)).not.toThrow();
+    });
+
+    test('quotes an event title with the "Invitation: X and Y @ time" shape', () => {
+      const input = `${fence}\ntype: concept\ntitle: Invitation: Matt and Jake @ Fri Jun 26\n${fence}\n\nbody`;
+      const { content, fixes } = autoFixFrontmatter(input);
+      expect(fixes.some(f => f.code === 'YAML_PARSE')).toBe(true);
+      expect(content).toContain(`title: 'Invitation: Matt and Jake @ Fri Jun 26'`);
+    });
+
+    test('leaves an already-quoted value with a colon inside untouched', () => {
+      const input = `${fence}\ntype: concept\ntitle: 'Deal: 123 Main St'\n${fence}\n\nbody`;
+      const { content, fixes } = autoFixFrontmatter(input);
+      expect(content).toBe(input);
+      expect(fixes.some(f => f.code === 'YAML_PARSE')).toBe(false);
+    });
+
+    test('a colon-broken value that also contains a double quote gets double-quote-safe escaping', () => {
+      const input = `${fence}\ntype: concept\ntitle: Deal: "Big" House\n${fence}\n\nbody`;
+      const { content, fixes } = autoFixFrontmatter(input);
+      expect(fixes.some(f => f.code === 'YAML_PARSE')).toBe(true);
+      const data = matterParse(content).data as Record<string, unknown>;
+      expect(data.title).toBe('Deal: "Big" House');
+    });
+
+    test('a colon-broken value that also contains an apostrophe gets double-quoted instead of \'\'-escaped', () => {
+      const input = `${fence}\ntype: concept\ntitle: Deal: Matt's House\n${fence}\n\nbody`;
+      const { content, fixes } = autoFixFrontmatter(input);
+      expect(fixes.some(f => f.code === 'YAML_PARSE')).toBe(true);
+      expect(content).toContain(`title: "Deal: Matt's House"`);
+      const data = matterParse(content).data as Record<string, unknown>;
+      expect(data.title).toBe("Deal: Matt's House");
+    });
+
+    test('a legitimate bare date value is left as a real date, not stringified', () => {
+      const input = `${fence}\ntype: concept\ntitle: Deal: 123 Main St\ndate: 2024-06-01\n${fence}\n\nbody`;
+      const { content, fixes } = autoFixFrontmatter(input);
+      expect(fixes.some(f => f.code === 'YAML_PARSE')).toBe(true);
+      const data = matterParse(content).data as Record<string, unknown>;
+      // gray-matter/js-yaml coerce a bare date scalar to a real Date — the
+      // fix must not have quoted the date line into a string.
+      expect(data.date instanceof Date || /^2024-06-01/.test(String(data.date))).toBe(true);
+      expect(content).toMatch(/^date: 2024-06-01\s*$/m);
+    });
+
+    test('a legitimate bare numeric value is left as a real number, not stringified', () => {
+      const input = `${fence}\ntype: concept\ntitle: Deal: 123 Main St\ncount: 42\n${fence}\n\nbody`;
+      const { content, fixes } = autoFixFrontmatter(input);
+      expect(fixes.some(f => f.code === 'YAML_PARSE')).toBe(true);
+      const data = matterParse(content).data as Record<string, unknown>;
+      expect(data.count).toBe(42);
+      expect(content).toMatch(/^count: 42\s*$/m);
+    });
+
+    test('a clean file with no colon-in-scalar issue produces zero writes', () => {
+      const input = `${fence}\ntype: concept\ntitle: A perfectly normal title\ndate: 2024-06-01\ncount: 42\n${fence}\n\nbody`;
+      const { content, fixes } = autoFixFrontmatter(input);
+      expect(content).toBe(input);
+      expect(fixes).toEqual([]);
+    });
+
+    test('idempotent: running the YAML_PARSE fix twice is a no-op on the second pass', () => {
+      const input = `${fence}\ntype: concept\ntitle: Deal: 123 Main St\n${fence}\n\nbody`;
+      const first = autoFixFrontmatter(input);
+      const second = autoFixFrontmatter(first.content);
+      expect(second.content).toBe(first.content);
+      expect(second.fixes).toEqual([]);
+    });
   });
 });
 

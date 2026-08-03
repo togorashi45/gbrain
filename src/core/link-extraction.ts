@@ -831,6 +831,48 @@ export const FRONTMATTER_LINK_MAP: FrontmatterFieldMapping[] = [
   { fields: ['related', 'see_also'], type: 'related_to', direction: 'outgoing', dirHint: '' },
 ];
 
+/**
+ * Cheap, pure yes/no probe: does this page contain ANYTHING the link or
+ * timeline extractor would produce a candidate from?
+ *
+ * Built for the `links_extraction_lag` doctor check (doctor.ts). That check
+ * used to count pages whose `links_extracted_at` watermark is missing or
+ * behind and call them "un-extracted edges" — but a page can be fully
+ * scanned and have nothing wrong with it: no wikilinks, no entity-dir
+ * markdown links, no dated timeline lines, no frontmatter relationship
+ * fields. Running the real extractor on such a page is a complete no-op —
+ * it just stamps the watermark. Verified on the atomic and jeremiah boxes:
+ * `extract --stale` processed the whole flagged set and link/timeline
+ * counts didn't move.
+ *
+ * Reuses the SAME pure regex passes the real extractor runs
+ * (extractEntityRefs, parseTimelineEntries) plus a resolver-free frontmatter
+ * field check (skips display-name resolution — this is a probe, not the
+ * extraction itself, so "the field exists" is enough to call the page a
+ * genuine candidate). Extraction has no LLM cost (see extract.ts header),
+ * so running this probe ahead of a real extract pass is cheap and honest.
+ *
+ * Not a perfect predictor: bare-slug body references (extractPageLinks'
+ * step 2, which needs the full page-index to resolve) aren't checked here,
+ * so this can under-count in rare cases. That only makes the doctor warning
+ * MORE conservative, never noisier — which is the failure mode being fixed.
+ */
+export function pageHasExtractableContent(
+  content: string,
+  frontmatter: Record<string, unknown>,
+  pageType: string,
+): boolean {
+  if (extractEntityRefs(content).length > 0) return true;
+  if (parseTimelineEntries(content).length > 0) return true;
+  for (const mapping of FRONTMATTER_LINK_MAP) {
+    if (mapping.pageType && mapping.pageType !== pageType) continue;
+    for (const field of mapping.fields) {
+      if (frontmatter[field] != null) return true;
+    }
+  }
+  return false;
+}
+
 // ─── Slug resolver ──────────────────────────────────────────────
 
 export interface SlugResolver {

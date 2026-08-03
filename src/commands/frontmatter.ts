@@ -95,10 +95,14 @@ validate
     NULL_BYTES, NESTED_QUOTES, EMPTY_FRONTMATTER
 
   --fix      Auto-repair the fixable subset (NULL_BYTES, MISSING_CLOSE,
-             NESTED_QUOTES, SLUG_MISMATCH). Writes a backup under
-             ~/.gbrain/backups/frontmatter/... before any in-place rewrite.
-             Backups work for both git and non-git brain repos without
-             littering the source tree.
+             NESTED_QUOTES, SLUG_MISMATCH, and the colon-in-scalar form of
+             YAML_PARSE, e.g. an unquoted title like "Deal: 123 Main St").
+             Writes a backup under ~/.gbrain/backups/frontmatter/... before
+             any in-place rewrite. Backups work for both git and non-git
+             brain repos without littering the source tree. Findings outside
+             this set (EMPTY_FRONTMATTER, MISSING_OPEN, structural
+             YAML_PARSE) are reported as skipped, not silently left at
+             files_fixed: 0.
   --dry-run  Preview --fix without writing.
   --json     Emit a JSON envelope on stdout.
 
@@ -153,6 +157,11 @@ interface FileValidation {
   errors: { code: ParseValidationCode; message: string; line?: number }[];
   fixesApplied?: AuditFix[];
   backupPath?: string;
+  /** Error codes that were present on this file and that --fix could not
+   *  repair (either an unfixable kind, e.g. MISSING_OPEN, or a fixable kind
+   *  whose specific instance the mechanical repair didn't resolve, e.g. a
+   *  structurally-broken YAML_PARSE that isn't a simple colon-in-scalar). */
+  unfixedCodes?: ParseValidationCode[];
 }
 
 /**
@@ -223,6 +232,16 @@ async function runValidate(rest: string[]): Promise<void> {
         result.backupPath = createFrontmatterBackup(file, { sourcePath: resolved, runId: backupRunId });
         writeFileSync(file, fixed, 'utf8');
       }
+
+      // Re-validate against the fixed content (or the original, when nothing
+      // was written) so we can report exactly which findings --fix could not
+      // repair, instead of leaving an operator staring at files_fixed: 0
+      // with no idea why nothing happened.
+      const postFixParsed = parseMarkdown(fixed, file, { validate: true, expectedSlug });
+      const remainingCodes = new Set((postFixParsed.errors ?? []).map(e => e.code));
+      if (remainingCodes.size > 0) {
+        result.unfixedCodes = [...remainingCodes];
+      }
     }
 
     results.push(result);
@@ -232,6 +251,20 @@ async function runValidate(rest: string[]): Promise<void> {
   const filesWithErrors = results.filter(r => r.errors.length > 0).length;
   const filesFixed = results.filter(r => (r.fixesApplied?.length ?? 0) > 0).length;
 
+  // Aggregate unfixed-finding kinds across the run so a --fix that repaired
+  // nothing (or only part of a file) says WHY, not just files_fixed: 0.
+  const skippedKindCounts = new Map<ParseValidationCode, number>();
+  if (flags.fix) {
+    for (const r of results) {
+      for (const code of r.unfixedCodes ?? []) {
+        skippedKindCounts.set(code, (skippedKindCounts.get(code) ?? 0) + 1);
+      }
+    }
+  }
+  const skippedKinds = [...skippedKindCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([code, files_count]) => ({ code, files: files_count }));
+
   if (flags.json) {
     const envelope = {
       ok: totalErrors === 0,
@@ -240,6 +273,7 @@ async function runValidate(rest: string[]): Promise<void> {
       files_with_errors: filesWithErrors,
       total_errors: totalErrors,
       files_fixed: flags.fix ? filesFixed : undefined,
+      skipped_kinds: flags.fix && skippedKinds.length > 0 ? skippedKinds : undefined,
       dry_run: flags.dryRun || undefined,
       results,
     };
@@ -265,6 +299,12 @@ async function runValidate(rest: string[]): Promise<void> {
       }
       if (flags.fix && !flags.dryRun) {
         console.log(`\nWrote centralized backups for ${filesFixed} file(s) under ~/.gbrain/backups/frontmatter/.`);
+      }
+      if (flags.fix && skippedKinds.length > 0) {
+        console.log(`\n--fix could not repair ${skippedKinds.length} finding kind(s), needs a human look:`);
+        for (const { code, files: n } of skippedKinds) {
+          console.log(`  ${code}: ${n} file(s)`);
+        }
       }
     }
   }
