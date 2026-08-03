@@ -2,6 +2,30 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.71.0] - 2026-08-03
+
+### Fixed
+- **`takes add` no longer overwrites DB-only takes (data loss fix).** Takes
+  written straight to the DB by `extract takes --from-pages` or the
+  consolidate phase leave no fence on disk, so `takes add` picked the next
+  `row_num` from the markdown fence alone and restarted at 1 on those pages.
+  The engine's `ON CONFLICT DO UPDATE` then replaced the live row instead of
+  appending. 14 takes were destroyed this way on a production brain. Fixed
+  by computing `row_num` as `MAX` across both the fence and the DB, and by
+  giving `addTakesBatch` a `conflict: 'insert'` mode (`ON CONFLICT DO
+  NOTHING`) that `takes add` uses so an occupied row can never be silently
+  overwritten. Regression test reproduces the exact scenario. Verified:
+  fails on the pre-fix code, passes after.
+
+### Added
+- New DB-plane config key `cycle.extract_atoms.min_page_chars`. The minimum
+  `compiled_truth` length for a brain page to enter atom extraction was a
+  hardcoded 500, global to every brain, with no way to tune it short of a
+  redeploy. Default stays 500, unconfigured brains behave exactly as
+  before. Read in both `discoverExtractablePages` and
+  `countExtractAtomsBacklog` so the phase and the doctor backlog count can
+  never disagree.
+
 ## [0.42.68.0] - 2026-07-28
 
 ### Fixed
