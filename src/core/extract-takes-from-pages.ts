@@ -16,6 +16,7 @@
 import type { BrainEngine } from './engine.ts';
 import type { TakeBatchInput, TakeKind } from './engine.ts';
 import { chat, getChatModel, isAvailable } from './ai/gateway.ts';
+import { resolveModel } from './model-config.ts';
 
 export const ALLOWED_PAGE_TYPES = [
   'concept', 'atom', 'lore', 'briefing', 'writing', 'originals',
@@ -55,7 +56,12 @@ export interface ExtractTakesFromPagesOpts {
   includeCovered?: boolean;
   /** Owner identifier for the inserted takes. Default 'system'. */
   holder?: string;
-  /** Model override; defaults to facts.extraction_model. */
+  /**
+   * Model override (highest precedence). When unset, the classifier model
+   * resolves from the `facts.extraction_model` config key, and finally falls
+   * back to the gateway chat model (`getChatModel()`). See
+   * `getTakesExtractionModel` for the full chain.
+   */
   model?: string;
   /** Progress hook called per page. */
   onProgress?: (done: number, total: number, claims: number) => void;
@@ -107,6 +113,38 @@ export function parseClaimsJson(raw: string): Array<{ claim: string; kind: TakeK
   }
 }
 
+/**
+ * Resolve the classifier model for takes bootstrap.
+ *
+ * Takes extraction is the most output-heavy phase we run (thousands of JSON
+ * claims per corpus pass), so it must be tierable independently of chat.
+ * Before this it was welded to `getChatModel()` while the interface doc
+ * claimed it read `facts.extraction_model` — the comment was right about the
+ * intent and the code never honored it.
+ *
+ * Precedence (routed through the same `resolveModel` mechanism
+ * `facts/extract.ts` uses):
+ *   1. explicit `opts.model` (CLI `--model`)
+ *   2. `facts.extraction_model` config
+ *   3. `getChatModel()` — the gateway chat model (#2997 behavior)
+ *
+ * Deliberately passes NO `tier`. `resolveModel`'s tier step resolves
+ * `TIER_DEFAULTS.<tier>` ahead of the caller fallback, which would silently
+ * move every unconfigured install onto hardcoded Sonnet. Keeping the fallback
+ * at `getChatModel()` makes this a behavioral no-op until an operator sets
+ * `facts.extraction_model`.
+ */
+export async function getTakesExtractionModel(
+  engine: BrainEngine | null,
+  cliFlag?: string,
+): Promise<string> {
+  return await resolveModel(engine, {
+    cliFlag,
+    configKey: 'facts.extraction_model',
+    fallback: getChatModel(),
+  });
+}
+
 export async function extractTakesFromPages(
   engine: BrainEngine,
   opts: ExtractTakesFromPagesOpts,
@@ -133,6 +171,8 @@ export async function extractTakesFromPages(
   const dryRun = opts.dryRun ?? false;
   const maxPages = opts.maxPages ?? 50;
   const holder = opts.holder ?? 'system';
+  // Resolve once per run, not per page: the chain reads config rows.
+  const classifierModel = await getTakesExtractionModel(engine, opts.model);
   const sourceFilter = opts.sourceIdFilter ? `AND source_id = $1` : '';
   const params = opts.sourceIdFilter ? [opts.sourceIdFilter] : [];
 
@@ -190,11 +230,12 @@ export async function extractTakesFromPages(
     let response: { text: string };
     try {
       response = await chat({
-        // #2997 — default to the configured chat model (file-plane gateway
-        // config, same idiom as enrich.ts) instead of hardcoded cloud Haiku.
-        // On OAuth/local-only installs the hardcoded model made every takes
-        // extraction die with llm_unavailable despite a working chat_model.
-        model: opts.model || getChatModel(),
+        // Tiered per getTakesExtractionModel: opts.model → facts.extraction_model
+        // → getChatModel(). The chat-model fallback preserves #2997 (hardcoded
+        // cloud Haiku killed OAuth/local-only installs with llm_unavailable);
+        // the config key lets operators put chat and takes extraction on
+        // different models, which matters because this phase is output-heavy.
+        model: classifierModel,
         system: CLASSIFIER_SYSTEM,
         messages: [
           {

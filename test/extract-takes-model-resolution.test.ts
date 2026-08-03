@@ -17,7 +17,10 @@ import {
   resetGateway,
   __setChatTransportForTests,
 } from '../src/core/ai/gateway.ts';
-import { extractTakesFromPages } from '../src/core/extract-takes-from-pages.ts';
+import {
+  extractTakesFromPages,
+  getTakesExtractionModel,
+} from '../src/core/extract-takes-from-pages.ts';
 
 let engine: PGLiteEngine;
 const seenModels: string[] = [];
@@ -89,5 +92,62 @@ describe('extractTakesFromPages — model resolution (#2997)', () => {
     });
     expect(r.pages_scanned).toBe(1);
     expect(seenModels).toEqual(['anthropic:claude-haiku-4-5']);
+  });
+});
+
+/**
+ * Tiering: takes extraction is the most output-heavy phase we run, so it must
+ * be settable independently of chat. The interface doc claimed `opts.model`
+ * "defaults to facts.extraction_model" while the code read `getChatModel()`
+ * and never consulted the key. Pins the full chain:
+ *
+ *   opts.model → facts.extraction_model → getChatModel()
+ *
+ * The chat-model tail is load-bearing: unconfigured installs (six live boxes)
+ * must keep the exact #2997 behavior, so this is a no-op by default.
+ */
+describe('extractTakesFromPages — facts.extraction_model tiering', () => {
+  beforeEach(async () => {
+    await engine.setConfig('facts.extraction_model', '');
+    await engine.setConfig('models.default', '');
+    configureGateway({
+      chat_model: 'openai:gpt-config-plane-test',
+      env: { OPENAI_API_KEY: 'sk-test-model-resolution' },
+    });
+  });
+
+  test('unconfigured: still resolves to the chat model (no behavior change)', async () => {
+    await seedPage();
+    const r = await extractTakesFromPages(engine, { bootstrapEnabled: true, maxPages: 50 });
+    expect(r.pages_scanned).toBe(1);
+    expect(seenModels).toEqual(['openai:gpt-config-plane-test']);
+  });
+
+  test('facts.extraction_model overrides the chat model', async () => {
+    await engine.setConfig('facts.extraction_model', 'openrouter:openai/gpt-5.6-luna');
+    await seedPage();
+    const r = await extractTakesFromPages(engine, { bootstrapEnabled: true, maxPages: 50 });
+    expect(r.pages_scanned).toBe(1);
+    expect(seenModels).toEqual(['openrouter:openai/gpt-5.6-luna']);
+  });
+
+  test('explicit opts.model beats both', async () => {
+    await engine.setConfig('facts.extraction_model', 'openrouter:openai/gpt-5.6-luna');
+    await seedPage();
+    const r = await extractTakesFromPages(engine, {
+      bootstrapEnabled: true,
+      maxPages: 50,
+      model: 'anthropic:claude-haiku-4-5',
+    });
+    expect(r.pages_scanned).toBe(1);
+    expect(seenModels).toEqual(['anthropic:claude-haiku-4-5']);
+  });
+
+  test('getTakesExtractionModel: chain is resolvable without running extraction', async () => {
+    expect(await getTakesExtractionModel(engine)).toBe('openai:gpt-config-plane-test');
+    await engine.setConfig('facts.extraction_model', 'openrouter:openai/gpt-5.6-terra');
+    expect(await getTakesExtractionModel(engine)).toBe('openrouter:openai/gpt-5.6-terra');
+    expect(await getTakesExtractionModel(engine, 'anthropic:claude-haiku-4-5'))
+      .toBe('anthropic:claude-haiku-4-5');
   });
 });
