@@ -19,6 +19,7 @@
 import { createHash } from 'crypto';
 import { existsSync, readFileSync, readdirSync, copyFileSync, writeFileSync, mkdirSync, lstatSync } from 'fs';
 import { join, relative, resolve, dirname, basename, isAbsolute } from 'path';
+import { safeLoad as yamlSafeLoad } from 'js-yaml';
 import type { BrainEngine } from './engine.ts';
 import type { ProgressReporter } from './progress.ts';
 import { gbrainPath } from './config.ts';
@@ -114,16 +115,41 @@ export function createFrontmatterBackup(filePath: string, opts: FrontmatterBacku
 // ---------------------------------------------------------------------------
 
 /**
+ * Quote a raw YAML scalar so it parses safely, picking the quote style that
+ * needs the least escaping:
+ *   - No apostrophe in the value: single-quote (YAML doubles a literal `'`
+ *     as `''`, so a value with no apostrophe never needs escaping).
+ *   - Apostrophe present: double-quote instead, escaping backslashes and
+ *     any embedded double quotes. Double quotes read cleaner than the `''`
+ *     doubling dance when the value already has an apostrophe in it.
+ */
+function quoteYamlScalar(value: string): string {
+  if (value.includes("'")) {
+    return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  }
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+/**
  * Mechanical auto-repair for the fixable subset of validation codes:
  *   - NULL_BYTES        — strip \x00 characters
  *   - NESTED_QUOTES     — rewrite `"... "inner" ..."` to single-quoted outer
  *   - MISSING_CLOSE     — insert `---` before the first heading found inside
  *                          the YAML zone
  *   - SLUG_MISMATCH     — remove `slug:` line (gbrain derives slug from path)
+ *   - YAML_PARSE        — quote an unquoted top-level scalar that contains
+ *                          ": " (colon + space), the real-world cause of
+ *                          most YAML_PARSE breaks on the fleet (an unquoted
+ *                          title like `title: Deal: 123 Main St`). Legit
+ *                          non-string values (dates, numbers) parse fine on
+ *                          their own and are left alone; nested maps/lists
+ *                          and other structural breakage are not covered and
+ *                          still need a human.
  *
  * Idempotent: running twice is a no-op on already-clean input. Any error class
- * not in the list above is left untouched (e.g. EMPTY_FRONTMATTER, YAML_PARSE,
- * MISSING_OPEN — those need human review).
+ * not in the list above, and any YAML_PARSE case outside the colon-in-scalar
+ * pattern, is left untouched (e.g. EMPTY_FRONTMATTER, MISSING_OPEN — those
+ * need human review).
  */
 export function autoFixFrontmatter(
   content: string,
@@ -298,6 +324,89 @@ export function autoFixFrontmatter(
             description: 'Rewrote nested double-quoted YAML values to single-quoted',
           });
           nestedQuotesFixed = true;
+        }
+      }
+    }
+  }
+
+  // 3b. YAML_PARSE — the #1 real-world break on the fleet: an unquoted
+  //     scalar containing a colon followed by a space, e.g.
+  //     `title: Deal: 123 Main St` or
+  //     `title: Invitation: Matt and Jake @ Fri Jun 26`. Plain YAML scalars
+  //     cannot contain ": " — the parser reads it as the start of a nested
+  //     mapping and the whole document dies. Fix: quote the value.
+  //
+  //     Scoped narrowly so it never touches content that already parses:
+  //       - Only runs when the frontmatter block currently fails to parse.
+  //       - Only considers top-level `key: value` lines (no leading
+  //         indentation) — nested maps/lists need structural understanding
+  //         this mechanical pass doesn't have and are left for a human.
+  //       - Skips values that are already quoted, are flow collections
+  //         (`[...]`, `{...}`), block scalars (`|`, `>`), or YAML
+  //         anchors/tags/aliases (`&`, `*`, `!`).
+  //       - Only quotes a line whose OWN raw text fails to parse as YAML in
+  //         isolation. A legitimate date (`date: 2024-06-01`) or number
+  //         (`count: 123`) parses fine on its own and is left as a real
+  //         non-string value — quoting it would silently turn a date into a
+  //         string, which is exactly what coerceFrontmatterString's callers
+  //         (and the NON_STRING_FIELD finding) exist to avoid.
+  //       - After rewriting, re-checks that the WHOLE block now parses.
+  //         If it still doesn't, the rewrite is discarded — never leave a
+  //         file more broken than it started.
+  {
+    const lines = working.split('\n');
+    let firstNonEmpty = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].trim().length > 0) { firstNonEmpty = i; break; }
+    }
+    if (firstNonEmpty >= 0 && lines[firstNonEmpty].trim() === '---') {
+      let closeIdx = -1;
+      for (let i = firstNonEmpty + 1; i < lines.length; i++) {
+        if (lines[i].trim() === '---') { closeIdx = i; break; }
+      }
+      if (closeIdx !== -1) {
+        const zoneText = lines.slice(firstNonEmpty + 1, closeIdx).join('\n');
+        let blockParses = true;
+        try { yamlSafeLoad(zoneText); } catch { blockParses = false; }
+
+        if (!blockParses) {
+          let fixedAny = false;
+          for (let i = firstNonEmpty + 1; i < closeIdx; i++) {
+            const line = lines[i];
+            const m = line.match(/^([A-Za-z_][\w-]*)\s*:\s(.+)$/);
+            if (!m) continue;
+            const [, key, rawValue] = m;
+            const value = rawValue.trimEnd();
+            if (value.length === 0) continue;
+            // Already quoted — leave it alone.
+            if (/^(['"]).*\1$/.test(value)) continue;
+            // Flow collections and block-scalar/anchor/tag indicators need
+            // their own handling, not blanket quoting.
+            if (/^[\[{|>&*!]/.test(value)) continue;
+
+            let lineParses = true;
+            try { yamlSafeLoad(line); } catch { lineParses = false; }
+            if (lineParses) continue; // parses fine on its own — not the culprit
+
+            lines[i] = `${key}: ${quoteYamlScalar(value)}`;
+            fixedAny = true;
+          }
+
+          if (fixedAny) {
+            const newZoneText = lines.slice(firstNonEmpty + 1, closeIdx).join('\n');
+            let nowParses = true;
+            try { yamlSafeLoad(newZoneText); } catch { nowParses = false; }
+            if (nowParses) {
+              working = lines.join('\n');
+              fixes.push({
+                code: 'YAML_PARSE',
+                description: 'Quoted unquoted scalar value(s) containing ": " that broke YAML parsing',
+              });
+            }
+            // else: rewrite didn't fully repair the block — discard it and
+            // leave the file untouched. Caller reports YAML_PARSE as
+            // remaining/unfixed since it's still in the errors list.
+          }
         }
       }
     }

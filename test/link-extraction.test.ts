@@ -11,6 +11,7 @@ import {
   isAutoLinkEnabled,
   FRONTMATTER_LINK_MAP,
   unwrapWikilink,
+  pageHasExtractableContent,
   type SlugResolver,
 } from '../src/core/link-extraction.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -1678,5 +1679,47 @@ describe('extractFrontmatterLinks — [[wikilink]] related: values (end-to-end)'
     expect(candidates).toHaveLength(0);
     expect(unresolved).toHaveLength(1);
     expect(unresolved[0]).toEqual({ field: 'related', name: '[[99-archive/does-not-exist]]' });
+  });
+});
+
+// Fleet finding (atomic + jeremiah boxes): the `links_extraction_lag` doctor
+// check counted "not yet scanned" pages as "has un-extracted edges." A page
+// with no wikilinks, no entity-dir markdown links, no dated timeline lines,
+// and no frontmatter relationship fields is fully processed once scanned —
+// there is nothing in it to extract. pageHasExtractableContent is the cheap
+// pure probe doctor.ts pre-scans stale pages with before warning.
+describe('pageHasExtractableContent', () => {
+  test('true when the body has an entity-dir markdown link', () => {
+    expect(pageHasExtractableContent('See [Alice](people/alice) for details.', {}, 'concept')).toBe(true);
+  });
+
+  test('true when the body has an Obsidian wikilink', () => {
+    expect(pageHasExtractableContent('Met with [[people/bob]] today.', {}, 'concept')).toBe(true);
+  });
+
+  test('true when the body has a dated timeline line', () => {
+    expect(pageHasExtractableContent('- **2026-06-01** | Kicked off the project', {}, 'concept')).toBe(true);
+  });
+
+  test('true when a frontmatter link field is present, even with no body content', () => {
+    expect(pageHasExtractableContent('', { company: 'Acme' }, 'person')).toBe(true);
+  });
+
+  test('a frontmatter field only counts for its mapped page type', () => {
+    // `company` only maps for pageType 'person'; on a 'concept' page it's
+    // not a recognized relationship field.
+    expect(pageHasExtractableContent('', { company: 'Acme' }, 'concept')).toBe(false);
+  });
+
+  test('false for genuinely empty content: no links, no dates, no link fields', () => {
+    expect(pageHasExtractableContent('Just some plain prose with nothing special in it.', {}, 'concept')).toBe(false);
+  });
+
+  test('false for blank content and blank frontmatter', () => {
+    expect(pageHasExtractableContent('', {}, 'concept')).toBe(false);
+  });
+
+  test('a bare `sources` frontmatter field counts regardless of page type', () => {
+    expect(pageHasExtractableContent('', { sources: ['some-article'] }, 'concept')).toBe(true);
   });
 });

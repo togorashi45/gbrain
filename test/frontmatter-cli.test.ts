@@ -142,4 +142,39 @@ describe('gbrain frontmatter CLI (B4)', () => {
     expect(code).toBe(1);
     expect(stderr).toContain('not found');
   });
+
+  // Fleet finding: doctor tells operators to run `frontmatter validate --fix`
+  // for YAML_PARSE breaks, but the old --fix silently no-opped on every real
+  // case (files_fixed: 0, failures persist) because YAML_PARSE wasn't in the
+  // fixable set. --fix now repairs the colon-in-scalar form of YAML_PARSE.
+  test('validate --fix repairs a real-world colon-in-title YAML_PARSE break', () => {
+    const f = join(tmp, 'deal.md');
+    const gbrainHome = join(tmp, 'home');
+    writeFileSync(f, `${fence}\ntype: concept\ntitle: Deal: 123 Main St\n${fence}\n\nbody`);
+    const { stdout, code } = runCli(['validate', f, '--fix', '--json'], { GBRAIN_HOME: gbrainHome });
+    expect(code).toBe(0);
+    const env = JSON.parse(stdout);
+    expect(env.files_fixed).toBe(1);
+    expect(env.skipped_kinds).toBeUndefined();
+    expect(readFileSync(f, 'utf8')).toContain(`title: 'Deal: 123 Main St'`);
+  });
+
+  test('validate --fix reports skipped kinds instead of a silent files_fixed: 0', () => {
+    const f = join(tmp, 'unfixable.md');
+    const gbrainHome = join(tmp, 'home');
+    // MISSING_OPEN — no leading --- at all. Not in the mechanically-fixable
+    // set; --fix must say so rather than leaving an operator to guess why
+    // files_fixed came back 0.
+    writeFileSync(f, `no frontmatter here\n\nbody`);
+    const { stdout, code } = runCli(['validate', f, '--fix', '--json'], { GBRAIN_HOME: gbrainHome });
+    expect(code).toBe(0);
+    const env = JSON.parse(stdout);
+    expect(env.files_fixed).toBe(0);
+    expect(env.skipped_kinds).toBeDefined();
+    expect(env.skipped_kinds.some((k: { code: string }) => k.code === 'MISSING_OPEN')).toBe(true);
+
+    const human = runCli(['validate', f, '--fix'], { GBRAIN_HOME: gbrainHome });
+    expect(human.stdout).toContain('could not repair');
+    expect(human.stdout).toContain('MISSING_OPEN');
+  });
 });

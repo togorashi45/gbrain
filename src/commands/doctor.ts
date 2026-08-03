@@ -45,7 +45,7 @@ import { isSourceUnchangedSinceSync } from '../core/git-head.ts';
 // this pure comparator (no git subprocess on the HTTP MCP doctor path).
 import { lagFromContentMs } from '../core/source-health.ts';
 import { CHUNKER_VERSION } from '../core/chunkers/code.ts';
-import { LINK_EXTRACTOR_VERSION_TS } from '../core/link-extraction.ts';
+import { LINK_EXTRACTOR_VERSION_TS, pageHasExtractableContent } from '../core/link-extraction.ts';
 import { isUndefinedColumnError } from '../core/utils.ts';
 // issue #1777: hidden_by_search_policy — count chunked pages withheld from
 // default search by the hard-exclude prefix policy. Reuses the canonical
@@ -895,10 +895,11 @@ export async function doctorReportRemote(engine: BrainEngine): Promise<DoctorRep
   // v0.42.x (#1794, 4A): pool-budget nudge when GBRAIN_MAX_CONNECTIONS is set.
   checks.push(await checkPoolBudget(engine));
 
-  // v0.42.7 (#1696): link-extraction lag. Strictly SQL (single indexed COUNT),
-  // safe on the thin-client/remote path — remote operators on checkout-less
-  // Postgres brains are exactly who can't otherwise see the extraction backlog.
-  // Brain-wide here (remote --source scoping is a separate TODO, like orphan_ratio).
+  // v0.42.7 (#1696): link-extraction lag. DB-only (COUNT + a bounded content
+  // pre-scan query, no filesystem/git access), safe on the thin-client/remote
+  // path — remote operators on checkout-less Postgres brains are exactly who
+  // can't otherwise see the extraction backlog. Brain-wide here (remote
+  // --source scoping is a separate TODO, like orphan_ratio).
   checks.push(await checkLinksExtractionLag(engine));
 
   // v0.39 T7 + T9 — schema-pack health checks (3 checks per v0.38 plan):
@@ -3177,6 +3178,23 @@ export const EXTRACTION_LAG_WARN_PCT_DEFAULT = 20;
  *  (unless an explicit --source scope is set). Shared by doctor + the sync
  *  nudge (D6/C4) so their skip predicates match exactly. */
 export const EXTRACTION_LAG_MIN_PAGES = 100;
+/**
+ * Fleet finding (atomic + jeremiah boxes): `stale` (missing/behind
+ * links_extracted_at watermark) is NOT the same thing as "has un-extracted
+ * edges." A page with no wikilinks, no entity-dir markdown links, no dated
+ * timeline lines, and no frontmatter relationship fields is fully processed
+ * once scanned — there's nothing IN it to extract. `extract --stale`
+ * confirmed this on both boxes: it processed the whole flagged set and
+ * link/timeline counts didn't move; the warning only cleared because the
+ * watermark got stamped.
+ *
+ * Extraction is pure deterministic regex with no LLM cost (see extract.ts
+ * header), so pre-scanning stale pages' content with the SAME regexes
+ * before warning is cheap and legitimate. Cap how many stale pages get
+ * pre-scanned per check run so a brain with a genuinely enormous backlog
+ * doesn't turn a doctor run into a full-content walk; above the cap the
+ * hit-rate on the sampled prefix is extrapolated across the full stale set. */
+export const EXTRACTION_LAG_SCAN_CAP_DEFAULT = 2000;
 
 /**
  * v0.42.7 (#1696, C1): generic "read a positive number from an env var, warn
@@ -3559,58 +3577,225 @@ export async function computeConversationFactsBacklogCheck(
  * `opts.sourceId` scopes both the denominator and the stale count to one
  * source (the explicit-only `--source` parse, like orphan_ratio).
  */
+/**
+ * Result of the extraction-lag content pre-scan. `null` means "not
+ * applicable" (no pages, or brain too small and not source-scoped) — callers
+ * should treat that as OK / no-nudge, not as an error.
+ */
+export interface ExtractionLagSignal {
+  total: number;
+  stale: number;
+  pct: number;
+  warnPct: number;
+  failPct?: number;
+  scope: string;
+  /** True when the RAW stale% clears warn or fail — gates whether the
+   *  content pre-scan ran at all (cheap early-out when it obviously wouldn't). */
+  rawWouldFlag: boolean;
+  /** Pre-scan fields — 0/false when rawWouldFlag was false (pre-scan skipped). */
+  scanned: number;
+  extractable: number;
+  sampled: boolean;
+  estimatedExtractable: number;
+  extractablePct: number;
+  /** The real "should we warn/fail" signal — extractablePct against the
+   *  same thresholds, i.e. what checkLinksExtractionLag warns on and what
+   *  the sync nudge (sync.ts:maybeExtractionNudge) must also key off of so
+   *  "the nudge fires iff doctor would warn" stays true after the content
+   *  pre-scan fix (both call this same function; no independent copy of
+   *  the raw-vs-genuine distinction to drift out of sync). */
+  wouldWarn: boolean;
+  wouldFail: boolean;
+}
+
+/**
+ * v0.42.7 (#1696) — shared computation behind the `links_extraction_lag`
+ * doctor check AND the end-of-sync nudge (sync.ts:maybeExtractionNudge).
+ * Single source of truth so both surfaces warn on the exact same signal —
+ * see the `wouldWarn`/`wouldFail` doc above.
+ */
+export async function computeExtractionLagSignal(
+  engine: BrainEngine,
+  opts?: { sourceId?: string },
+): Promise<ExtractionLagSignal | null> {
+  const sourceId = opts?.sourceId;
+  const totalRows = await engine.executeRaw<{ count: number }>(
+    sourceId
+      ? `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND source_id = $1`
+      : `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL`,
+    sourceId ? [sourceId] : [],
+  );
+  const total = Number(totalRows[0]?.count ?? 0);
+  if (total === 0) return null;
+  // Vacuous-skip tiny brains unless explicitly source-scoped. Shared floor
+  // const so both callers skip on the exact same predicate.
+  if (total < EXTRACTION_LAG_MIN_PAGES && !sourceId) return null;
+
+  const stale = await engine.countStalePagesForExtraction({ sourceId, versionTs: LINK_EXTRACTOR_VERSION_TS });
+  const pct = (stale / total) * 100;
+  const scope = sourceId ? ` in source '${sourceId}'` : '';
+
+  const warnPct = _resolveEnvNumber('GBRAIN_EXTRACTION_LAG_WARN_PCT', EXTRACTION_LAG_WARN_PCT_DEFAULT, { unit: '%' });
+  // Fail threshold is DISABLED unless explicitly set (warn-only default). A
+  // bare unset env var → no hard-fail; invalid value → warn-once + disabled.
+  let failPct: number | undefined;
+  const failRaw = process.env.GBRAIN_EXTRACTION_LAG_FAIL_PCT;
+  if (failRaw !== undefined && failRaw !== '') {
+    const n = Number(failRaw);
+    if (Number.isFinite(n) && n > 0) {
+      failPct = n;
+    } else if (!_envNumberWarned.has('GBRAIN_EXTRACTION_LAG_FAIL_PCT')) {
+      _envNumberWarned.add('GBRAIN_EXTRACTION_LAG_FAIL_PCT');
+      console.warn(`[gbrain doctor] Ignoring invalid GBRAIN_EXTRACTION_LAG_FAIL_PCT=${failRaw}; hard-fail stays disabled.`);
+    }
+  }
+
+  // Cheap early-out: the raw "unscanned" count doesn't even clear the
+  // threshold, so there's no point pre-scanning content for something we
+  // wouldn't warn on anyway.
+  const rawWouldFlag = pct > warnPct || (failPct !== undefined && pct > failPct);
+  if (!rawWouldFlag) {
+    return {
+      total, stale, pct, warnPct, failPct, scope, rawWouldFlag,
+      scanned: 0, extractable: 0, sampled: false, estimatedExtractable: 0, extractablePct: 0,
+      wouldWarn: false, wouldFail: false,
+    };
+  }
+
+  // Pre-scan: how many of the `stale` (unscanned/edited-since) pages
+  // actually contain something the extractor would produce a candidate
+  // from? Bounded so a huge genuine backlog doesn't turn this into a
+  // full-brain content walk; above the cap, the hit-rate on the sampled
+  // prefix is extrapolated across the full stale set.
+  const scanCap = _resolveEnvNumber('GBRAIN_EXTRACTION_LAG_SCAN_CAP', EXTRACTION_LAG_SCAN_CAP_DEFAULT, { unit: '' });
+  const scanTarget = Math.min(stale, scanCap);
+  let scanned = 0;
+  let extractable = 0;
+  let afterPageId: number | undefined;
+  while (scanned < scanTarget) {
+    const batchSize = Math.min(500, scanTarget - scanned);
+    const rows = await engine.listStalePagesForExtraction({
+      batchSize, afterPageId, sourceId, versionTs: LINK_EXTRACTOR_VERSION_TS,
+    });
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      scanned++;
+      if (pageHasExtractableContent(`${row.compiled_truth}\n${row.timeline}`, row.frontmatter, row.type)) {
+        extractable++;
+      }
+    }
+    afterPageId = rows[rows.length - 1]!.id;
+    if (rows.length < batchSize) break; // exhausted before hitting the cap
+  }
+
+  const sampled = scanned < stale;
+  // Extrapolate the sampled hit-rate across the full stale set so the
+  // reported count stays comparable to `stale` even when capped.
+  const estimatedExtractable = sampled && scanned > 0
+    ? Math.round((extractable / scanned) * stale)
+    : extractable;
+  const extractablePct = (estimatedExtractable / total) * 100;
+
+  return {
+    total, stale, pct, warnPct, failPct, scope, rawWouldFlag,
+    scanned, extractable, sampled, estimatedExtractable, extractablePct,
+    wouldFail: failPct !== undefined && extractablePct > failPct,
+    wouldWarn: extractablePct > warnPct,
+  };
+}
+
+/**
+ * v0.42.7 (#1696) — links_extraction_lag doctor check.
+ *
+ * The signal that surfaces the "imported ≠ curated" root cause: pages whose
+ * link/timeline extraction is stale (never run, edited-since, or extractor
+ * bumped). Without it, a brain can run for months at 0% typed-edge coverage
+ * with nothing warning the operator.
+ *
+ * Warn-only by DEFAULT (>20% stale). Hard-fail ONLY when the operator opts in
+ * via GBRAIN_EXTRACTION_LAG_FAIL_PCT — so a just-upgraded 280K-page brain
+ * (every page NULL → 100% stale) gets a loud WARN, never a non-zero exit that
+ * would break a CI/cron pipeline gating on `gbrain doctor`.
+ *
+ * Vacuous-skip on tiny brains (<100 pages, no --source) like orphan_ratio.
+ * Pre-v112 brains (column missing) degrade to OK via isUndefinedColumnError.
+ *
+ * `opts.sourceId` scopes both the denominator and the stale count to one
+ * source (the explicit-only `--source` parse, like orphan_ratio).
+ *
+ * Fleet finding (atomic + jeremiah boxes): `stale` counts pages whose
+ * links_extracted_at watermark is missing/behind — that is NOT the same
+ * thing as "has un-extracted edges." A page with no wikilinks, no entity-dir
+ * markdown links, no dated timeline lines, and no frontmatter relationship
+ * fields is fully processed once scanned — there's nothing IN it to extract,
+ * but the raw watermark still reads stale and got counted as backlog.
+ * `extract --stale` confirmed this live: it processed the whole flagged set
+ * and link/timeline counts didn't move; the warning only cleared because the
+ * watermark got stamped. Fix: computeExtractionLagSignal pre-scans stale
+ * pages' content with the SAME pure regexes the real extractor runs
+ * (extraction is deterministic, no LLM cost — see extract.ts header) and
+ * only warns on the genuinely-extractable portion.
+ */
 export async function checkLinksExtractionLag(
   engine: BrainEngine,
   opts?: { sourceId?: string },
 ): Promise<Check> {
   const name = 'links_extraction_lag';
-  const sourceId = opts?.sourceId;
   const fix = "Run: gbrain extract --stale";
   try {
-    const totalRows = await engine.executeRaw<{ count: number }>(
-      sourceId
-        ? `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND source_id = $1`
-        : `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL`,
-      sourceId ? [sourceId] : [],
-    );
-    const total = Number(totalRows[0]?.count ?? 0);
-    if (total === 0) {
-      return { name, status: 'ok', message: 'Extraction lag not applicable (no pages)' };
-    }
-    // Vacuous-skip tiny brains unless explicitly source-scoped. Shared floor
-    // const so the sync nudge (D6/C4) skips on the exact same predicate.
-    if (total < EXTRACTION_LAG_MIN_PAGES && !sourceId) {
+    const sig = await computeExtractionLagSignal(engine, opts);
+    if (sig === null) {
+      // Distinguish the two vacuous-skip reasons for a clear message; the
+      // signal itself doesn't carry which one fired, so re-derive cheaply.
+      const totalRows = await engine.executeRaw<{ count: number }>(
+        opts?.sourceId
+          ? `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND source_id = $1`
+          : `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL`,
+        opts?.sourceId ? [opts.sourceId] : [],
+      );
+      const total = Number(totalRows[0]?.count ?? 0);
+      if (total === 0) {
+        return { name, status: 'ok', message: 'Extraction lag not applicable (no pages)' };
+      }
       return { name, status: 'ok', message: `Extraction lag not applicable (${total} pages — too few to assess)` };
     }
 
-    const stale = await engine.countStalePagesForExtraction({ sourceId, versionTs: LINK_EXTRACTOR_VERSION_TS });
-    const pct = (stale / total) * 100;
+    const { total, stale, pct, warnPct, failPct, scope, extractablePct, estimatedExtractable, sampled, scanned } = sig;
     const pctStr = pct.toFixed(0);
-    const scope = sourceId ? ` in source '${sourceId}'` : '';
+    const extractablePctStr = extractablePct.toFixed(0);
+    const sampleNote = sampled ? ` (sampled ${scanned}/${stale})` : '';
 
-    const warnPct = _resolveEnvNumber('GBRAIN_EXTRACTION_LAG_WARN_PCT', EXTRACTION_LAG_WARN_PCT_DEFAULT, { unit: '%' });
-    // Fail threshold is DISABLED unless explicitly set (warn-only default). A
-    // bare unset env var → no hard-fail; invalid value → warn-once + disabled.
-    let failPct: number | undefined;
-    const failRaw = process.env.GBRAIN_EXTRACTION_LAG_FAIL_PCT;
-    if (failRaw !== undefined && failRaw !== '') {
-      const n = Number(failRaw);
-      if (Number.isFinite(n) && n > 0) {
-        failPct = n;
-      } else if (!_envNumberWarned.has('GBRAIN_EXTRACTION_LAG_FAIL_PCT')) {
-        _envNumberWarned.add('GBRAIN_EXTRACTION_LAG_FAIL_PCT');
-        console.warn(`[gbrain doctor] Ignoring invalid GBRAIN_EXTRACTION_LAG_FAIL_PCT=${failRaw}; hard-fail stays disabled.`);
-      }
-    }
+    const details: Record<string, unknown> = {
+      total, stale, pct: Number(pctStr), warn_pct: warnPct, fail_pct: failPct ?? null, source_id: opts?.sourceId ?? null,
+      scanned: sig.scanned, extractable: sig.extractable, sampled: sig.sampled,
+      estimated_extractable: estimatedExtractable, extractable_pct: Number(extractablePctStr),
+    };
 
-    const details = { total, stale, pct: Number(pctStr), warn_pct: warnPct, fail_pct: failPct ?? null, source_id: sourceId ?? null };
-    if (failPct !== undefined && pct > failPct) {
-      return { name, status: 'fail', message: `${stale}/${total} pages (${pctStr}%)${scope} need link/timeline extraction (> ${failPct}% fail threshold). ${fix}`, details };
+    if (!sig.rawWouldFlag) {
+      return { name, status: 'ok', message: `Extraction current: ${stale}/${total} pages (${pctStr}%) unscanned${scope}`, details };
     }
-    if (pct > warnPct) {
-      return { name, status: 'warn', message: `${stale}/${total} pages (${pctStr}%)${scope} have un-extracted edges. ${fix}`, details };
+    if (sig.wouldFail) {
+      return {
+        name, status: 'fail',
+        message: `${estimatedExtractable}/${total} pages (${extractablePctStr}%)${scope} have genuinely un-extracted links/timeline entries${sampleNote} (> ${failPct}% fail threshold). ${fix}`,
+        details,
+      };
     }
-    return { name, status: 'ok', message: `Extraction current: ${stale}/${total} pages (${pctStr}%) stale${scope}`, details };
+    if (sig.wouldWarn) {
+      return {
+        name, status: 'warn',
+        message: `${estimatedExtractable}/${total} pages (${extractablePctStr}%)${scope} have genuinely un-extracted links/timeline entries${sampleNote}. ${fix}`,
+        details,
+      };
+    }
+    // The raw watermark looked stale, but the content pre-scan found nothing
+    // to extract on those pages — they're processed, just empty. Say so
+    // instead of quietly downgrading to OK with no explanation.
+    return {
+      name, status: 'ok',
+      message: `Extraction current: ${stale}/${total} pages (${pctStr}%) unscanned${scope}, but pre-scan found nothing extractable in them${sampleNote}`,
+      details,
+    };
   } catch (e) {
     // Pre-v112 brain: links_extracted_at column doesn't exist yet. Graceful OK
     // (migration/bootstrap adds it; nothing to assess until then).
