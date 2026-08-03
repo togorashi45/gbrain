@@ -16,6 +16,10 @@
  *   4. writes the .md file back
  *   5. mirrors to the DB via the engine method
  *   6. releases the lock (auto via withPageLock)
+ *
+ * `add` inverts steps 4 and 5: it picks row_num from MAX across the fence AND
+ * the DB, then inserts insert-only (ON CONFLICT DO NOTHING) before writing the
+ * markdown, so a row that already exists in the DB can never be overwritten.
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -210,17 +214,44 @@ async function cmdAdd(engine: BrainEngine, args: string[], sourceId?: string): P
   await withPageLock(slug, async () => {
     const path = pageFilePath(brainDir, slug);
     const body = readBodyOrEmpty(path);
-    const { body: nextBody, rowNum } = upsertTakeRow(body, {
-      claim, kind, holder, weight, source, sinceDate: since, active: true,
-    });
-    writeBody(path, nextBody);
 
-    // Mirror to DB. Page may not be in DB yet if not synced — caller must run sync first.
+    // Page must exist in the DB before we pick a row number — caller must run
+    // sync first.
     const pageId = await getPageId(engine, slug, sourceId);
-    await engine.addTakesBatch([{
+
+    // The next row_num is the max across BOTH planes, not the fence alone.
+    // Takes written straight to the DB (`gbrain extract takes --from-pages`,
+    // the consolidate phase) leave no fence on disk, so a fence-only max
+    // restarts at 1 and the DB write lands on top of a live row. Same
+    // MAX(row_num) source the engine's supersedeTake and the consolidate
+    // phase already use.
+    const fenceMax = parseTakesFence(body).takes.reduce((m, t) => Math.max(m, t.rowNum), 0);
+    const dbRows = await engine.executeRaw<{ max: number }>(
+      `SELECT COALESCE(MAX(row_num), 0)::int AS max FROM takes WHERE page_id = $1`,
+      [pageId],
+    );
+    const rowNum = Math.max(fenceMax, Number(dbRows[0]?.max ?? 0)) + 1;
+
+    // DB first, insert-only. `conflict: 'insert'` compiles to ON CONFLICT DO
+    // NOTHING, so an occupied row is skipped rather than overwritten and we
+    // see it as a zero count. Fail before touching the markdown so a losing
+    // race leaves both planes untouched.
+    const inserted = await engine.addTakesBatch([{
       page_id: pageId, row_num: rowNum, claim, kind, holder, weight,
       since_date: since, source, active: true, superseded_by: null,
-    }]);
+    }], { conflict: 'insert' });
+    if (inserted !== 1) {
+      console.error(
+        `Take #${rowNum} already exists on ${slug}; nothing was written. ` +
+        `Re-run the command, or inspect the page with \`gbrain takes ${slug}\`.`,
+      );
+      process.exit(1);
+    }
+
+    const { body: nextBody } = upsertTakeRow(body, {
+      rowNum, claim, kind, holder, weight, source, sinceDate: since, active: true,
+    });
+    writeBody(path, nextBody);
     console.log(`Added take #${rowNum} to ${slug}.`);
   });
 }

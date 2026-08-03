@@ -121,6 +121,17 @@ import type { BatchAuditSite } from './retry.ts';
 export interface BatchOpts {
   auditSite?: BatchAuditSite;
   signal?: AbortSignal;
+  /**
+   * Conflict policy for `addTakesBatch` only. Default `'update'` keeps the
+   * derived-index semantics extract-takes depends on: markdown is canonical,
+   * so re-extracting a fence overwrites the DB row it owns.
+   *
+   * `'insert'` is for writers that are creating a NEW take rather than
+   * re-projecting an existing one. It compiles to `ON CONFLICT DO NOTHING`,
+   * so an occupied (page_id, row_num) can never be overwritten; the caller
+   * sees a returned count lower than the batch size and fails loudly.
+   */
+  conflict?: 'update' | 'insert';
 }
 
 /** Input row for addLinksBatch. Optional fields default to '' (matches NOT NULL DDL). */
