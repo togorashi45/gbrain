@@ -101,6 +101,27 @@ writing or reviewing an operation, consult `src/core/operations.ts` for the cont
   [`./llms-full.txt`](./llms-full.txt) is the same map with core docs inlined for
   single-fetch ingestion.
 
+## Running tests while you iterate (read before your first test run)
+
+`bun run test` / `npm test` maps to `bash scripts/run-unit-parallel.sh`. That is
+1000-plus files and roughly 50 minutes. Do not run it to check a change.
+
+- **While iterating, run targeted files in the FOREGROUND.** A single file
+  finishes in about 1 to 2 seconds. `bun test test/doctor-fix.test.ts` is the
+  loop. Pass several paths when a change spans modules.
+- **Run the full suite once, at the end, detached, and poll the log yourself.**
+  `nohup bash scripts/run-unit-parallel.sh > /tmp/full-suite.log 2>&1 &` then
+  read `/tmp/full-suite.log` on an interval. Never park your turn waiting for a
+  background-run notification. Three agents stalled that way in one day; two
+  burned over 250k tokens sitting idle on a notification that never came.
+- **Some PGlite test files segfault bun when several run in one process.** If
+  you hit `panic(main thread): Segmentation fault`, run the files one at a time.
+  It is not a failure of your change.
+- **`error: Cannot find package 'ai' from src/core/ai/gateway.ts` is a
+  dependency problem, not a logic failure.** It means the checkout has no
+  `node_modules`, which is what happens in a fresh `git worktree`. Run
+  `bun install` in that directory. Do not go looking for a bug in the gateway.
+
 ## Before shipping
 
 Easiest path: `bun run ci:local` runs the full CI gate inside Docker (gitleaks,

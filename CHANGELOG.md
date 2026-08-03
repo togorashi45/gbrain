@@ -2,6 +2,96 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.72.2-rspur.1] - 2026-08-03 (fork)
+
+Fork release. Merges upstream v0.42.70.0 through v0.42.72.1, lands three
+doctor and takes fix branches, and fixes two silent-wrongness bugs found on
+production brains.
+
+### Fork tag scheme
+
+Fork releases are tagged `vX.Y.Z.W-rspur.N` from here on. Bare `vX.Y.Z.W` is
+reserved for unmodified upstream content. The old bare fork tags collided with
+upstream releases carrying different content, so if upstream were ever added as
+a remote a force tag fetch would silently overwrite our own release pointers.
+Retagged, old tags removed only after the new ones were verified on the remote:
+
+| Was | Now | Commit |
+|-----|-----|--------|
+| `v0.42.68.0` | `v0.42.68.0-rspur.1` | `063f8f34` |
+| `v0.42.69.0` | `v0.42.69.0-rspur.1` | `312a15a8` |
+| `v0.42.70.0` | `v0.42.70.0-rspur.1` | `0ac1898f` |
+| `v0.42.71.0` | `v0.42.71.0-rspur.1` | `65b1b094` |
+
+### Fixed
+
+- **Takes at exactly the threshold weight were silently dropped.**
+  `takes.weight` is `REAL` (float4). A bare `weight >= 0.7` has no
+  `real >= numeric` operator, so both sides widen to float8, where the stored
+  value is `0.699999988079071` and the literal is `0.7`. `takes add --weight
+  0.7` wrote a row that `weight >= 0.7` then refused to see. This undercounted
+  high-conviction takes in the doctor `abandoned_threads` check and in the
+  serve-http abandoned-threads ship-state endpoint, and it sat on the boundary
+  of the cycle drift band (`0.3` and `0.85`, which happened to survive because
+  float4 rounds one up and the other down). Fixed by casting the LITERAL down
+  to real (`weight >= 0.7::real`) so float4 meets float4 and the boundary row
+  is included. Casting the column up (`weight::numeric >= 0.7`) is also correct
+  but throws away `idx_takes_weight_active`. Thresholds and the SQL builders
+  now live in `src/core/takes-weight-sql.ts`. A commit message on the previous
+  release (`e92bfd4d`) claimed this was already fixed; it was not, and both
+  known sites still carried the bare literal.
+- **`abandoned_threads` warned on any brain with a month-precision take.** The
+  check cast `since_date` straight to `date`, and `takes add --since YYYY-MM`
+  writes month precision, so `'2026-06'::date` raised "invalid input syntax for
+  type date" and turned the whole check into a warn. Normalized to the 1st,
+  matching what the serve-http query already did.
+- **Dream-cycle summary pages could be written without their raw-trace
+  exemption.** Two writers can land a `dream-cycle-summaries/<date>` page: the
+  orchestrator's deterministic index write, and a synthesize subagent's
+  `put_page` (that prefix is in the `dream_synthesize_paths` allow-list). A
+  subagent-authored summary only ever got the frontmatter
+  `stampDreamProvenance` writes, which was `dream_generated` plus
+  `dream_cycle_date` and nothing else. 28 such pages on a production brain
+  carried no `raw_trace_exempt` and warned forever in the doctor
+  `raw_provenance` check, because a deterministic index has no source document
+  of its own to point at. The key set now lives in one place,
+  `src/core/cycle/dream-summary-frontmatter.ts`; the orchestrator builds from
+  it and the provenance stamp routes summary slugs through
+  `ensureDreamSummaryExemption`, so the exemption lands in the same UPDATE. Add
+  a key in one place and both writers get it.
+- **`frontmatter validate --fix` silently no-opped on every repair.**
+  `yamlSafeLoad` was referenced in `src/core/brain-writer.ts` and never
+  imported. Fixed, and `--fix` now repairs `YAML_PARSE` from an unquoted colon
+  in a title and reports the kinds it skipped.
+- **`links_extraction_lag` warned on pages with nothing to extract.** Stale
+  (missing or behind the `links_extracted_at` watermark) is not the same thing
+  as having un-extracted edges. The check now pre-scans stale pages' content
+  with the same deterministic regexes extraction uses, capped per run, and
+  warns on genuinely extractable content only. `maybeExtractionNudge` in
+  `sync.ts` calls the same shared function, so the nudge fires exactly when
+  doctor would warn.
+- **Four doctor checks that cried wolf.** `multi_source_drift` now skips
+  sources that share a `local_path` (tag-isolated, not directory-isolated).
+  `content_sanity_audit_recent` attributes sources correctly and counts
+  distinct pages instead of raw events, which grew purely with cron frequency.
+  `type_proliferation` reads pack aliases through `buildAliasGraph` instead of
+  declared names only. `conversation_format_coverage` drops `email` from the
+  checked types (a single message can never match a multi-turn pattern, so it
+  was a permanent no-match floor) and gains a `granola-inline-me-them` builtin
+  plus an inline-turn normalizer.
+- **Takes bootstrap extraction honored the chat model instead of
+  `facts.extraction_model`.** `extract takes --from-pages` was welded to the
+  chat model, so model tiering never reached it.
+
+### Upstream
+
+Merged `sync/upstream-v0.42.72.1`: upstream v0.42.70.0 through v0.42.72.1,
+roughly 30 releases-worth of commits including two community fix waves, the
+OAuth slug-prefix write fence, GitHub release publishing for binary self-update,
+cross-directory wikilink resolution, and the silent-failure doctor check batch.
+Their entries follow below. Every fork change listed above was re-verified in
+the merged tree by reading the code, not by trusting the clean auto-merge.
+
 ## [0.42.71.0-rspur.1] - 2026-08-03 (fork)
 
 ### Fixed

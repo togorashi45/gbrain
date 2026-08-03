@@ -1060,7 +1060,9 @@ export function checkSelfUpgradeHealth(): Check {
 // --- v0.36.1.0 calibration doctor checks (T12) ---
 
 /**
- * abandoned_threads: surfaces active high-conviction takes (weight >= 0.7)
+ * abandoned_threads: surfaces active high-conviction takes (weight at or
+ * above HIGH_CONVICTION_WEIGHT; see takes-weight-sql.ts for why the SQL
+ * literal must be cast to real)
  * older than 12 months that have neither been superseded nor linked to a
  * follow-up page. These are commitments the user made and never revisited.
  * Status 'ok' with a count; never warns/fails (this is signal, not error).
