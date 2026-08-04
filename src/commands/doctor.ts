@@ -3931,7 +3931,20 @@ export async function checkContentHashDuplicates(engine: BrainEngine): Promise<C
   }
 }
 
-/** Walk a repo for markdown files and return their slugified (lowercased) slugs. */
+/**
+ * Walk a repo for markdown files and return their slugified (lowercased) slugs.
+ *
+ * Only prunes actual VCS/vendor internals (`.git`, `node_modules`) at descent
+ * time. It used to prune EVERY entry whose name starts with `.` via a bare
+ * `startsWith('.')` check, so a git-tracked, file-backed content directory
+ * like `.sources/` (used by the corpus/firehose sources) was never walked --
+ * every page under it came back as "no backing file" from
+ * checkUndeclaredDbOnlyPages even though `git ls-files` shows the file
+ * tracked and on disk. `.git` itself is not git-tracked content (it IS the
+ * VCS metadata) so it stays excluded; every other dot-prefixed directory in
+ * a source's local_path is ordinary tracked content from this check's point
+ * of view and must be walked.
+ */
 function collectMarkdownSlugs(root: string): Set<string> {
   const out = new Set<string>();
   const stack = [''];
@@ -3944,7 +3957,7 @@ function collectMarkdownSlugs(root: string): Set<string> {
       continue;
     }
     for (const e of entries) {
-      if (e.name.startsWith('.') || e.name === 'node_modules') continue;
+      if (e.name === '.git' || e.name === 'node_modules') continue;
       const childRel = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory()) stack.push(childRel);
       else if (/\.mdx?$/i.test(e.name)) out.add(slugifyPath(childRel).toLowerCase());

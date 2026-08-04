@@ -150,6 +150,25 @@ describe('undeclared_db_only_pages (#2784)', () => {
     expect(c.status).toBe('ok');
   });
 
+  test('file backed under a git-tracked dot-directory (.sources/) → ok, not a false undeclared warning (#doctor-dotdir-walk)', async () => {
+    // collectMarkdownSlugs used to skip EVERY entry whose name starts with
+    // '.', so a page physically backed by a file under a committed dotdir
+    // like `.sources/corpus/...` was invisible to the walk and reported as
+    // undeclared/no-backing-file even though `git ls-files` shows it tracked.
+    // Only VCS internals (`.git`) and `node_modules` should be pruned; other
+    // dot-prefixed directories are ordinary git-tracked content here.
+    const repo = makeRepo();
+    mkdirSync(join(repo, '.sources', 'corpus', 'inbox'), { recursive: true });
+    writeFileSync(
+      join(repo, '.sources', 'corpus', 'inbox', '2026-06-25-299d640b.md'),
+      '# Inbox note',
+    );
+    await addSource('src-a', repo);
+    await addPage('.sources/corpus/inbox/2026-06-25-299d640b', { sourceId: 'src-a' });
+    const c = await checkUndeclaredDbOnlyPages(engine);
+    expect(c.status).toBe('ok');
+  });
+
   test('derive-phase default prefixes are implicitly declared', async () => {
     const repo = makeRepo();
     await addSource('src-a', repo);
