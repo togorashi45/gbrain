@@ -2,6 +2,24 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.44.0.0-rspur.1] - 2026-08-11 (fork)
+
+Fork release. Merges upstream v0.44.0.0 (41 commits, 300 files, +9884/-176 since
+v0.42.72.1) with no source-level conflicts: upstream's changes do not touch any
+file the rspur patch set modifies. All three merge conflicts were version
+bookkeeping (VERSION, package.json version field, this changelog).
+
+Carried forward unchanged from 0.42.72.2-rspur.1:
+- `takes add` no longer overwrites DB-only takes
+- four doctor false-positive fixes (shared local_path, mismatched checks)
+- `frontmatter --fix` repairs colon-in-scalar YAML_PARSE and reports skipped kinds
+- configurable `extract_atoms` page-length floor (default still 500)
+- float4 weight thresholds and dream-summary frontmatter drift
+
+Verified on the merged tree before release: 1529 tests across the patched
+surface, 0 failures (doctor 314, extract 496, takes 352, frontmatter 122,
+link-extraction 199, by-mention 46).
+
 ## [0.44.0.0] - 2026-06-12
 
 **BrainBench: agent memory now has a scorecard.** `gbrain eval brainbench` is a public, reproducible, cross-harness conformance suite for the four ways agent memory fails — and from this release forward, every memory PR must hold or move its numbers against a committed baseline that CI compares against master's own copy.
