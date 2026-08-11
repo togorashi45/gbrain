@@ -21,7 +21,7 @@ Vector search alone underdelivers on real personal-knowledge queries. This doc e
 
 ## The benchmark
 
-BrainBench (corpus + harness in the sibling [gbrain-evals](https://github.com/garrytan/gbrain-evals) repo) measures retrieval P@5, R@5, MRR, nDCG@5 on a 240-page Opus-generated rich-prose corpus.
+BrainBench (corpus + harness in the sibling [gbrain-evals](https://github.com/garrytan/gbrain-evals) repo) measures retrieval P@5, R@5, MRR, nDCG@5 on a 240-page Opus-generated rich-prose corpus. (This is the retrieval-ranking benchmark; the in-repo `gbrain eval brainbench` suite — [`docs/eval/BRAINBENCH.md`](../eval/BRAINBENCH.md) — gates the memory behaviors *above* retrieval: unprompted context push, write-back fidelity, cross-session continuity.)
 
 | Strategy | P@5 | R@5 | Notes |
 |---|---|---|---|
@@ -97,7 +97,11 @@ Promote or reject them via `gbrain extraction-pending` / `gbrain
 extraction-review`.
 
 The `search` MCP/CLI op is **cheap-hybrid** (vector + keyword + RRF + pool +
-title + alias, expansion off); `query` is the full-control variant. NamedThingBench
+title + alias, expansion off); `query` is the full-control variant. Route
+concept / landscape / "all-of-X" questions to `query` — expansion recovers
+synonym-phrased matches `search` can miss, and a populated `search` result set
+is not proof of coverage (both are top-K; exhaustive enumeration belongs to
+`list_pages`). NamedThingBench
 (`gbrain eval retrieval-quality`) gates these families on every PR. Diagnose a
 specific miss with `gbrain search diagnose "<q>" --target <slug>`.
 
@@ -116,7 +120,7 @@ The classifier is deterministic (no LLM call). Wrong classification degrades gra
 
 For `detail: 'high'` searches, `src/core/search/expansion.ts` runs a Haiku-class LLM call to produce 2-3 query variants. Each variant runs through the full hybrid stack; results merge via RRF. Catches synonym misses without recall loss.
 
-Expansion is opt-in per mode bundle (`tokenmax` on by default; `balanced` + `conservative` off). Default off in the cheap tiers because the LLM call adds ~$0.001/query and ~200ms — real money at scale.
+Expansion is opt-in per mode bundle (`tokenmax` on by default; `balanced` + `conservative` off). Default off in the cheap tiers because the LLM call adds ~$0.001/query and ~200ms — real money at scale. The `query` op is the exception: it defaults `expand: true` per call (pass `expand: false` to opt out) — expansion-by-default is what makes it the concept/landscape verb.
 
 ## Putting it together
 

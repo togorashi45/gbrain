@@ -2,6 +2,285 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.44.0.0-rspur.1] - 2026-08-11 (fork)
+
+Fork release. Merges upstream v0.44.0.0 (41 commits, 300 files, +9884/-176 since
+v0.42.72.1) with no source-level conflicts: upstream's changes do not touch any
+file the rspur patch set modifies. All three merge conflicts were version
+bookkeeping (VERSION, package.json version field, this changelog).
+
+Carried forward unchanged from 0.42.72.2-rspur.1:
+- `takes add` no longer overwrites DB-only takes
+- four doctor false-positive fixes (shared local_path, mismatched checks)
+- `frontmatter --fix` repairs colon-in-scalar YAML_PARSE and reports skipped kinds
+- configurable `extract_atoms` page-length floor (default still 500)
+- float4 weight thresholds and dream-summary frontmatter drift
+
+Verified on the merged tree before release: 1529 tests across the patched
+surface, 0 failures (doctor 314, extract 496, takes 352, frontmatter 122,
+link-extraction 199, by-mention 46).
+
+## [0.44.0.0] - 2026-06-12
+
+**BrainBench: agent memory now has a scorecard.** `gbrain eval brainbench` is a public, reproducible, cross-harness conformance suite for the four ways agent memory fails — and from this release forward, every memory PR must hold or move its numbers against a committed baseline that CI compares against master's own copy.
+
+Four suites, scored per harness seam:
+
+- **know-to-ask** — does memory volunteer the right context unprompted, and stay silent when it should? (`know_to_ask_failure_rate` + the anti-gaming `false_fire_rate` — "always inject" can't win both)
+- **push precision / recall** — when context is volunteered, was it the right context, within each harness's injection budget?
+- **write-back fidelity** — do conversation facts survive the PRODUCTION conversation→memory pipeline with correct provenance? (graded through a new injectable-extractor seam on the conversation-facts pipeline, so CI executes the shipped segmentation/insertion/dedup code with zero LLM calls; `--llm` opts into the real extractor under a run-scoped budget)
+- **continuity** — a decision recorded in one session, recalled by a different harness on the same brain
+
+Plus two cross-cutting measures: `source_isolation_violations` (gates at zero, every run — cross-source leakage is the data-leak invariant) and `avg_injected_tokens` (the intrusion budget, reported per harness).
+
+Every scoreboard row carries a `seam` label: the `openclaw` row exercises the shipped context-engine pipeline byte-for-byte (`production`); the `claude-code` and `codex` rows grade the same gbrain primitives through those harnesses' injection-shape contracts (`contract`) — the exported wire types are the contracts future integrations implement, and the rows flip to `production` with continuous numbers when they land. At v0.44.0.0 the production seam reads: know-to-ask failure 0.15 (the documented v1 reflex limits, now measured), push recall 0.81 at precision 1.0, write-back fidelity 1.0, continuity 1.0, zero isolation violations.
+
+### Added
+
+- `gbrain eval brainbench` — hermetic by default (in-memory PGLite, no keys, no LLM, ~7s for the full corpus), with `--harness`, `--suite`, `--fixtures DIR --gold DIR` (the foreign-runner surface), `--json`, `--out` (the canonical CI artifact), `--compare`, `--update-baseline`, `--justification`, `--allow-regression`, `--include-holdout`, and `--llm --budget-usd`. Exit codes are the contract: 0 pass, 1 regression, 2 error/inconclusive.
+- A 141-fixture / 241-gold-turn benchmark corpus across 7 stratified categories, generated deterministically (seed 42) over a whole-cloth fictional universe with SEALED gold (a `gold` key inside a fixture is a validation error; adapters only ever see sanitized turns), a ~15% holdout split, and a blind double-label validation receipt (96.4% agreement) recorded in the corpus ledger. Rebuild byte-identically with `bun evals/brainbench/generator/gen.ts`.
+- Published interchange contract for foreign runners: JSON Schemas for fixtures, gold, results, and baselines under `evals/brainbench/schema/` — point the CLI at any conforming corpus and parse the schema'd receipt back.
+- A CI gate (`brainbench` job + `scripts/ci-brainbench-gate.sh`) hardened through four adversarial review rounds: it compares against MASTER's committed baseline (a PR cannot rewrite the thing it's graded by), any baseline edit without a fixture change must byte-match the actual run, corpus changes route through a bless mode where shrinking gold coverage or regressing a metric requires a written justification visible in the PR diff, baselines bind their run config, and the gate fails hard — never silently open — on broken refs or deleted baselines.
+- Eleven new metrics in the metric glossary (plain-English definitions in `docs/eval/METRIC_GLOSSARY.md`); every JSON response carries the standard `_meta.metric_glossary` block.
+- Methodology doc at `docs/eval/BRAINBENCH.md`: seam disclosure, formulas, pre-registered expectations, determinism posture, gate governance, gold methodology, and accepted residuals.
+
+### Changed
+
+- `gbrain eval run-all --suites brainbench` now actually runs the suite in-process (closing the long-standing orchestrator-stub follow-up) and records one result per sweep under `EvalRunRecord` schema v3 with `mode: 'n/a'` — benchmark records no longer fabricate a search mode.
+- The conversation-facts pipeline accepts an injectable per-segment extractor (default unchanged — the LLM path); this is the seam the write-back suite grades production code through.
+- The synthetic-corpus privacy guard now scans the BrainBench corpus dirs (fixtures AND gold) alongside the calibration corpus, and the fixture-authoring guide adds scenario-level privacy rules: scenarios are invented whole-cloth, never anonymized from real situations.
+- The CI aggregate (`test-status`) now checks the brainbench job's result explicitly — a failing memory gate fails the branch-protection check.
+
+### Fixed
+
+- CLI exit codes for the new command route through the shared write-fence + aliveness-grace exit seam, so PGLite's WASM exit-code stomping and Bun's exit-time stdout discard can't corrupt the CI contract.
+
+To take advantage of v0.44.0.0: run `gbrain eval brainbench` — no setup, no keys, no brain required. If it ever reports something broken after an upgrade, `bun evals/brainbench/generator/gen.ts` rebuilds the corpus byte-identically and `gbrain eval brainbench --update-baseline` re-derives the baseline from an actual run; both are safe to re-run any time.
+## [0.43.0.0] - 2026-08-08
+
+**Your agent now has five memory verbs it can actually reach.** Cathedral 1 freezes
+a stable, versioned memory protocol — `recall`, `remember`, `entity`, `synthesize`,
+`forget` — over the brain's operation catalog, the way Postgres speaks one wire
+protocol to every client. Point any MCP harness at it (`claude mcp add gbrain --
+gbrain serve --surface verbs`, or the Codex/OpenClaw equivalents) and the agent sees
+exactly five self-describing tools instead of a wall of internal ops. Every response
+carries what it is, why it matched, where it came from, and what it spent (the token
+budget on `recall`, latency on `entity`, the full cost block on `synthesize`) — and the
+contract never breaks: v1 field names and meanings are frozen, changes are
+additive-forever.
+
+What you can do now that you couldn't before:
+
+- **Remember a fact once, recall it in a fresh session — in any harness.** `remember`
+  takes mandatory provenance (where the fact came from) and an optional expiry, dedupes
+  against what's already known, and supersedes the old fact when it changes
+  ("X joined acme-example" → "X left acme-example" — the outdated fact expires, the
+  history stays). `recall` retrieves saved facts and,
+  with a query, budget-packed page snippets — the server enforces the token budget and
+  tells you what it dropped instead of trusting the client to trim.
+- **Look up one person/company/project as a compact card in well under 100ms, zero LLM
+  calls.** `entity` resolves a name to a privacy-safe card (who/what, aliases,
+  last-touched, open threads, top typed edges) — or, on a miss, near-miss suggestions
+  instead of a dead end.
+- **Reason across pages when you actually need it.** `synthesize` is the explicitly
+  expensive verb (it says so in its own description), with a best-effort cost block so
+  agents choose it deliberately. No API key configured? It says `unavailable` with a
+  fix, never a fake answer.
+- **Certify any memory server against the contract.** `gbrain protocol --json` publishes
+  the machine-readable spec; `gbrain protocol conformance [--target <endpoint>]` runs the
+  frozen-contract test suite against gbrain's own server or any MCP endpoint — and
+  provably fails servers that don't comply. `gbrain protocol stats` shows per-verb
+  adoption and your real time-to-first-use, all from a local file that never leaves
+  your machine.
+
+`gbrain serve` keeps every operation by default (`--surface full`) — existing installs
+are unchanged. The new `--surface verbs` is the quickstart surface for agents. No schema
+migration; the verbs ride the existing facts, pages, and typed-graph tables. The full
+contract, per-harness install blocks, and the additive-forever versioning policy live in
+[docs/protocol/MEMORY_VERBS_v1.md](docs/protocol/MEMORY_VERBS_v1.md).
+
+**This release also fixes which search verb your agent reaches for (#2416).** The
+`search` and `query` tool descriptions, the mandatory lookup chain, and the search
+guides had drifted from reality: they described `search` as keyword-only (it has been
+cheap hybrid — vector + keyword, no LLM expansion — for many releases) and told agents
+to try `search` first for everything, falling back to `query` only when results looked
+"thin". For concept questions ("all the X that do Y", "the ecosystem around Z") that
+fallback never fired, and synonym-phrased matches dropped silently.
+
+- **Concept questions now route to `query` by default.** The tool descriptions and the
+  lookup-chain convention are intent-driven: exact known tokens → `search` (cheaper, no
+  expansion call); concept / synonym / exhaustive-set questions → `query` first. Verified
+  with a live LLM routing eval: all concept phrasings route to `query`, and personal
+  questions still route to the salience ops.
+- **"Got results" is no longer treated as "got everything."** The descriptions, docs, and
+  conventions now say it plainly: a populated `search` result set is not proof of
+  coverage, and `query` is still top-K — literal exhaustive enumeration belongs to
+  `list_pages` pagination.
+- **The CLI nudges you when it can help.** A concept-shaped `gbrain search "..."` prints a
+  one-line hint on stderr suggesting the equivalent `gbrain query` call (results stay
+  clean on stdout; `--quiet` silences it; never auto-reroutes).
+- **`think` cost accounting reads consistently.** When no LLM call ran (stubbed or no
+  API key), `usage` is now uniformly `null` in `--json` output rather than sometimes
+  missing.
+
+To take advantage of v0.43.0.0: re-run `gbrain serve` with `--surface verbs` to give
+your coding agent the five-verb memory protocol (or keep `--surface full` for the
+complete operation catalog — both speak the verbs). Run `gbrain protocol conformance`
+to self-certify, and `gbrain protocol stats` to watch adoption. Memories your agent
+saves are readable by every agent connected to the brain by default; pass
+`visibility: "private"` for local-only facts. If your agent instructions or skill
+files copy the old "search first, query if thin" rule, refresh them from
+`skills/conventions/brain-first.md` — the shipped skillpack carries the corrected
+routing.
+## [0.42.76.0] - 2026-08-08
+
+**Mistyped or unsupported flags now fail loudly instead of being silently ignored — including the ones that were supposed to make a command safe.**
+
+**Strict flag validation, CLI-wide.** Every gbrain command now rejects a flag it does not understand, with a clear error naming the flag and the command, before any work runs. Before, commands read their flags ad hoc and ignored the rest — so `gbrain post-upgrade --dry-run` accepted the flag, ignored it, and applied migrations for real. That class is gone: the legal flags for every command are derived from each command's own source into a generated registry, checked before dispatch, and a command may only advertise a safety flag like `--dry-run` if its code actually reads it. On commands routed through the operations contract, a trailing `--dry-run` is now a real rehearsal switch rather than a no-op. `--json` invocations get the same error as a structured payload, so scripts fail cleanly too.
+
+**A word of warning (intentional breaking change):** cron jobs or scripts that pass stray, misspelled, or long-removed flags have been running on luck — the flag did nothing. Those invocations now exit with an error naming the flag. That is the point: fix the invocation once and it means what it says forever. Everything after `--` is passthrough and remains untouched.
+
+**Upgrades can't wedge on forward-referenced columns anymore — as a class.** The v0.42.56.0-era startup wedge (a schema blob referencing a column that pre-existing brains didn't have yet) had two more latent instances waiting in the jobs table. Both are now probed and healed at startup, and the schema coverage guard was rewritten to cross-reference every column referenced by the embedded schema against the set of columns any migration has ever added — so a new forward reference cannot ship without its startup probe. A recovery test walks the exact journey an affected brain takes: failed upgrade, retry on the fixed binary, converge with no leftover state blocking the way.
+
+**Remote agents get more, within the same fences.** The `think` operation is now available to remote MCP callers as a read-only synthesis — the local CLI can still persist results, while remote callers are forced read-only. Chunk reads now resolve through the same source-scope rules as page reads, so a federated grant that can open a page can also read that page's chunks, and a caller without the grant cannot reach chunks outside its own floor. Chunk payloads also stop carrying raw embedding vectors over the wire — noticeably smaller responses with no behavior change, since no consumer ever read them. Two internal call sites that forward caller identity now treat anything ambiguous as untrusted, matching the fail-closed rule the rest of the codebase already follows.
+
+**Source-bound clients can be minted over HTTP.** The `/admin/api/register-client` endpoint now accepts `source` and `federatedRead` bindings, mirroring the CLI's `--source` / `--federated-read` flags — so an admin UI or provisioning proxy can create a client confined to a specific brain source without shelling out to the CLI. Omitting both preserves the historical default, and invalid source ids get a structured 400.
+
+**`gbrain doctor` and `repair-jsonb` see further and misfire less.** The double-encoded-JSON scan now covers the subagent execution columns, and the damage test requires the stored text to actually parse as JSON before flagging it — a legitimate string value that merely starts with `[` or `{` (a log line, a code snippet) is no longer misclassified, and a repair pass can no longer corrupt it. One damaged table no longer aborts the scan of the rest.
+
+### To take advantage of v0.42.76.0
+## [0.42.75.0] - 2026-08-08
+
+**The "PGLite crashes on macOS 26" era is over: gbrain now repairs a torn brain in place, automatically, with your data preserved.**
+
+The dreaded `RuntimeError: Aborted()` at startup — the one that made zero-config brains unusable after a macOS upgrade and pushed people onto Homebrew Postgres — was never a macOS or WASM bug. An unclean shutdown (typically the upgrade reboot) tears the write-ahead log inside the data dir, and every open after that dies replaying it. gbrain now detects that failure on any command, backs up the WAL state to a sibling directory, resets it in place (the pg_resetwal recovery Postgres has shipped for decades, ported to run against PGLite data dirs), and reopens your brain — pages, embeddings, and history intact. Transactions that never reached a checkpoint may be lost; that is the standard trade for a database that would otherwise not open at all.
+
+### Added
+- **Automatic WAL repair on startup.** A torn-WAL abort self-heals on the next gbrain command: backup → in-place reset → retry, with a loud notice naming the backup and recommending `gbrain doctor`. Disable with `GBRAIN_PGLITE_WAL_REPAIR=off`.
+- **`gbrain pglite-repair`** — the deliberate version: `--dry-run` gives a read-only diagnosis of the data dir; `--yes` runs the same in-place repair manually. Refuses to operate while any live process holds the brain, and never force-removes another process's lock.
+- **`gbrain doctor` diagnoses unopenable PGLite brains.** A new `pglite_data_dir` check reads the data dir from disk when connect fails, names the right recovery rung (repair vs rebuild), inventories repair backups, and escalates when repairs keep recurring — the signal that something is still killing gbrain mid-write.
+- **Recovery guardrails throughout:** repair runs only under a cleanly-acquired lock (never after taking over another process's lock, with a quarantine window when a lock's holder couldn't be verified); a live database — including a native Postgres one — is refused by a `postmaster.pid` liveness check; repeated attempts inside one corruption episode reuse one backup instead of stacking copies (newest three episodes retained); a cooldown stops repair loops from silently eating data on machines where crashes keep recurring; and every restore path reports honestly whether your original files are back in place or waiting in the backup.
+
+### Changed
+- **`gbrain reinit-pglite` works bare.** The embedding model and dimensions now default from your config file, so the rebuild rung of the recovery ladder is one command mid-outage (explicit flags still win; environment overrides are deliberately ignored so a stale shell export can't change the rebuild target).
+- **Honest error messages.** The startup-abort hint now names the real cause (torn WAL after an unclean shutdown), states exactly what auto-repair did or why it stood down, and lays out the full ladder: repair → rebuild → engine switch. The docs that claimed PGLite is "incompatible with macOS 26.x" have been rewritten (README, INSTALL, ENGINES) — thanks @roysaurav for the original native-Postgres walkthrough, which remains the engine-switch rung.
+- Message-less WASM error objects no longer surface as `[object Object]`.
+
+### Fixed
+- The classifier that routes startup failures now matches the abort message PGLite actually produces (it previously fell through to a generic hint), while catalog corruption keeps routing to rebuild — WAL repair is never suggested for damage it cannot fix.
+- Lock-file reads can no longer misclassify a healthy live holder as corrupt (writes are atomic now), a holder owned by another user is treated as alive, and an in-flight acquisition is no longer mistaken for a corrupt lock.
+
+Credit where due: @yang1996202-cpu (#2575), @AndreLYL (#223), and @roysaurav (#1670) for reports and diagnosis, the #223 thread contributors whose recoveries proved the root cause, and @yestheboxer, whose rejected upstream recovery PR (electric-sql/pglite#994) this port builds on.
+
+### To take advantage of v0.42.75.0
+
+```bash
+gbrain upgrade
+```
+
+Nothing to configure. If a cron job or script starts failing with `unknown flag`, that invocation was passing a flag that did nothing — remove or fix the flag and it will not regress silently again.
+
+### For contributors
+
+Community fixes absorbed with credit: @colinagent (#2598 think read-scope; the upgrade-rewind e2e pattern from #2623), @guim4dev (#2016 register-client source bindings), @vinsew (#597 repair-jsonb coverage extension), @javieraldape (#2494/#2531 output-correctness class — BigInt-safe local rendering and the search `--json` regression pin land here; parts of both PRs shipped earlier from master). Thank you — superseded PRs are being closed with notes.
+
+The unit-test runner is now memory-safe on machines running multiple workspaces: shard concurrency adapts to actually-available memory, and a serial rescue lane re-runs files that died to OOM or external kills before calling them failures — a red suite now means real failures, not memory pressure. The flag registry regenerates via `bun run build:flag-registry` and is pinned by freshness, drift, and consumption-evidence guards.
+If your brain currently won't open, that's it — the next command repairs it. If you'd rather look first: `gbrain pglite-repair --dry-run`.
+
+## [0.42.74.0] - 2026-08-07
+
+**Two fixes for agents that reach a brain over the network: takes-holder visibility now works the way you set it, and the voice recipe is safe by default.**
+
+Legacy bearer tokens served over `gbrain serve --http` now honor the takes-holder allow-list you set with `gbrain auth permissions <token> set-takes-holders`. Before, that setting was read on one serving path but silently ignored on the other, so a remote agent saw only world-held takes no matter what you granted — a token you widened to see brain-held takes saw none of them, and a token you narrowed still saw the public ones. Both directions now behave as configured, an empty grant means "no takes" (not "the default set"), and the two serving paths decode and apply the grant through one shared piece of code so they cannot drift apart again. Tokens with no grant continue to fall back to public-only, so nothing widens on upgrade.
+
+The bundled voice-agent recipe (`recipes/agent-voice`) ships secure by default. Its reference server now refuses cross-origin browser requests unless you name the origins in `AGENT_VOICE_CORS_ORIGIN`, gates the endpoints that spend your OpenAI key or read your brain so a stray web page can't trigger them, and listens on loopback only until you set `HOST` to expose it. The voice page you run locally is unaffected. Because this recipe is copied into your own repo at install time, `gbrain integrations install agent-voice --refresh` picks up the hardened version.
+
+### To take advantage of v0.42.74.0
+
+```bash
+gbrain upgrade
+```
+
+Then, if you serve a brain to remote agents, set each token's takes-holder scope with `gbrain auth permissions <token> set-takes-holders world,brain` (or your desired holders). Voice-recipe operators run `gbrain integrations install agent-voice --refresh --target <your-host-repo>`, then set `AGENT_VOICE_CORS_ORIGIN` if a browser on another origin needs access and `HOST=0.0.0.0` only if the server must listen beyond loopback.
+
+### For contributors
+
+Both issues were reported by external security researchers who supplied fixes. Ship-stage adversarial review hardened two more spots: the two serving paths now share one permissions-decode helper (not just the allow-list parser) so a malformed double-encoded row can't make them disagree, and the hot-memory cache key encodes the allow-list collision-free so the empty-vs-absent distinction holds for every holder value. Credit @Derek95king (takes-holder threading) and @sebastiondev (voice-recipe CORS).
+
+## [0.42.73.2] - 2026-08-05
+
+**A write that deduplication redirects onto an existing page is now checked against the write scope of whoever asked for it.** When the same content arrives under a new slug, gbrain recognises it and points the write at the page that already holds it. That redirected target is now tested against the caller's own scope — under whichever mechanism confines that caller. One of the two mechanisms was consulted at that point; both are now.
+
+Nothing changes for local CLI use, or for clients that hold unrestricted write access — neither was ever scope-confined. A confined caller whose write dedups onto a page **inside** its own scope keeps working exactly as before; that redirect is a feature and it is preserved, with a regression test to keep it that way. A confined caller whose write dedups onto a page **outside** its scope now gets `permission_denied`, with the remedy in the message: drop the `id:` frontmatter field, or change the content, to write a new page under your own prefix. The denial does not name the page the write resolved to.
+
+Recommended for any brain served over HTTP to scope-restricted clients.
+
+### To take advantage of v0.42.73.2
+
+```bash
+gbrain upgrade
+```
+
+Nothing to configure. Existing clients keep their scopes unchanged, and no re-registration is needed.
+
+### For contributors
+
+Reported privately by an external security researcher, who supplied a fix and a regression test with it. The version that shipped composes the two existing scope-matching rules into a single predicate rather than restating either one, so the check at the door and the check after a redirect cannot drift apart; the audit the report prompted closed the same gap on one further caller path.
+
+## [0.42.73.1] - 2026-08-05
+
+**Removes the PR gate that v0.42.73.0 added, and reverts the v0.42.72.1 contribution-policy change it enforced.** The gate cannot function on this repository, and it caused a real incident before that was understood.
+
+The gate needed two things this repository does not grant it: an `ANTHROPIC_API_KEY` Actions secret for its verdict, and read-write workflow permissions to post a comment or set a label. Without them it can only skip. Worse, on its first live runs a read-only token turned every API call into a 403, the code treated that as a crash, and the check went red on an outside contributor's pull request four times with no comment explaining why. That was fixed in v0.42.73.0, but a check that runs on every pull request and can never reach a verdict does not earn its place in the repository.
+
+The v0.42.72.1 contribution policy is also withdrawn: the human-written intent paragraph and gbrain-in-use screenshot are no longer required on issues and pull requests. `CONTRIBUTING.md`, both issue templates, and the pull-request template return to their pre-2026-08-02 state, and issues and PRs are reviewed on their content by maintainers, as before.
+
+The code is preserved in git history at v0.42.73.0 and can be restored if the repository ever grants those permissions. If it is restored, the mechanical half — the intent and screenshot check, the version-first title rule, the red flags — should render to the Actions job summary instead of a comment, because that needs no token permission and no API key.
+
+### To take advantage of v0.42.73.1
+
+```bash
+gbrain upgrade
+```
+
+Nothing to change. Everything else v0.42.73.0 shipped — the five contributed correctness fixes, `slug_filter`, and the four dependency pins that cleared six CVEs — is unaffected and stays.
+
+## [0.42.73.0] - 2026-08-04
+
+**Every incoming pull request now gets a verdict before anyone reads it — and five contributed fixes for silent wrong answers.**
+
+**The PR gate.** Open a pull request against gbrain and an automated check now posts a single verdict comment within a minute: **merge-lane**, **close-lane**, or **needs-maintainer**, with its reasons and a checklist of what a human reviewer should verify for that specific diff. It also checks mechanically that the description carries the human-written intent paragraph and the screenshot of gbrain in use that `CONTRIBUTING.md` requires, and that the title leads with its version.
+
+It is deliberately **advisory** — a triage signal and a reviewer checklist, not an authorization boundary. A green verdict is not permission to merge; a maintainer still decides. Pull-request code is never checked out or executed: the verdict comes from the description and the diff read through the API. Maintainer, bot, and draft pull requests are exempt from the intent-and-screenshot floor only (release automation cannot screenshot itself); they still receive the full verdict. Where the rubric can be argued with, the decision is taken away from it: a merge-lane recommendation is downgraded automatically when a diff adds a dependency, a new provider recipe, or new config keys, edits workflows, deletes a test, exceeds 40 files or 400 net source lines, or changes `src/` without touching a single test.
+
+**Your import output parses again.** `gbrain import <dir> --json` printed five informational lines to stdout ahead of the JSON payload, so anything parsing that output read zero imports while its own bookkeeping recorded the files as ingested — and the next run skipped them permanently. Those lines now go to stderr under `--json`; human output is byte-for-byte unchanged.
+
+**`sources harden --dry-run` no longer changes anything.** It reset the helper's executable bit before reaching the dry-run check, so a documented preview quietly mutated permissions.
+
+**Telemetry records the model that actually ran.** Two nightly-cycle phases wrote a hardcoded or unrelated model name into their verdict cache, evidence signature, and spend metering while the gateway ran whatever chat model you configured. On any brain with a non-default model, the recorded history was fiction.
+
+**`gbrain integrity` stops contradicting itself.** Dead-link findings were counted in the "Review queue" total but written to a different file, so `integrity review` disagreed with `integrity auto`'s own summary. They now get their own line.
+
+**Retype rules can address API-ingested pages.** Mapping rules could only filter on a file path, which is empty for every page written through `put_page` — so no rule could target that whole class. A new `slug_filter` filters on the slug instead, and combines with the path filter when both are given.
+
+Also: the `integrity` source comment no longer documents a `--dry-run` subcommand form that exits with an error.
+
+### To take advantage of v0.42.73.0
+
+```bash
+gbrain upgrade
+gbrain import <dir> --json | jq .    # now parses
+gbrain integrity auto                # dead links reported separately
+```
+
+Nothing to configure for the gate — it runs on pull requests to this repository. If you maintain a fork and want it, the workflow needs an `ANTHROPIC_API_KEY` secret; without one it skips loudly rather than blocking anyone.
+
+### For contributors
+
+The gate went through six rounds against two independent blind reviewers, each judging cold. The findings that changed the design most were not exploits but false positives: a code fence that swallowed the rest of a description, an explanation written as bullet points scoring zero words, a word floor stricter than the published policy, and a comment telling contributors to reopen a pull request that was never closed. Those four descriptions are now permanent regression fixtures — a gate that insults a first-time contributor is worse than no gate. Two properties are deliberate and documented rather than fixed: the mechanical floor is a floor (a determined author clears it in seconds), and a bare URL in a cited reason still autolinks.
+
+Contributed by @YiconZiwei (#2655), @time-attack (#3764, #3759, #3726, #3751, #3739, and the gate groundwork in #3573/#3698).
+
 ## [0.42.72.2-rspur.1] - 2026-08-03 (fork)
 
 Fork release. Merges upstream v0.42.70.0 through v0.42.72.1, lands three
