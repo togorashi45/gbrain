@@ -38,6 +38,37 @@ function isExtractable(extractable: boolean | ExtractableSpec): boolean {
 }
 
 /**
+ * Return the Set of type names the pack EXPLICITLY declares non-extractable,
+ * including their aliases.
+ *
+ * This is the subtractive counterpart to `extractableTypesFromPack`, and it
+ * exists because the two are not interchangeable at the facts-eligibility call
+ * site. `facts/eligibility.ts` cannot simply switch to the additive set: its
+ * hardcoded `ELIGIBLE_TYPES` list contains types that real packs never declare
+ * at all (`slack`, `source`, `writing`, `media`, `tweet`, `atom`, `analysis`).
+ * Replacing the list with pack-extractable types would silently drop every one
+ * of those out of facts extraction. Subtracting only what a pack explicitly
+ * marks `extractable: false` is the narrow, non-regressing change.
+ *
+ * Aliases are included because `inferType` and the query-closure layer treat an
+ * alias as the same type, so a page can legitimately carry `type:
+ * calendar-event` while the pack declares `event` with
+ * `aliases: [calendar-event]`. Honoring the declaration without the aliases
+ * would leave exactly those pages extracting.
+ */
+export function nonExtractableTypesFromPack(
+  pack: Pick<SchemaPackManifest, 'page_types'>,
+): Set<string> {
+  const out = new Set<string>();
+  for (const pt of pack.page_types) {
+    if (isExtractable(pt.extractable)) continue;
+    out.add(pt.name);
+    for (const alias of pt.aliases ?? []) out.add(alias);
+  }
+  return out;
+}
+
+/**
  * Return the Set of pack-declared types with `extractable: true` OR
  * `extractable: <struct>`. Set return shape (vs array) because callers
  * want O(1) membership checks in the eligibility predicate, which fires

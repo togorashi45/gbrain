@@ -77,6 +77,54 @@ const ELIGIBLE_TYPES: PageType[] = [
 
 const MIN_BODY_CHARS = 80;
 
+/**
+ * Types the ACTIVE pack explicitly declares `extractable: false`, or null when
+ * the pack is not resolvable synchronously.
+ *
+ * Why this exists: a pack could already say `extractable: false` on a type and
+ * this predicate ignored it, so the flag stopped atom extraction (which does
+ * resolve the pack) while facts extraction kept running. On one brain that meant
+ * `email` was declared non-extractable on 2026-08-03, with a written rationale
+ * of "searchable, never extractable", and facts extraction still mined 30,604
+ * email pages for another two weeks against the configured chat model. The flag
+ * that exists to express "do not extract this" was honored by one pipeline and
+ * silently ignored by the other.
+ *
+ * Why it is SUBTRACTIVE and not a replacement: see
+ * `nonExtractableTypesFromPack`. `ELIGIBLE_TYPES` below holds types no pack
+ * declares (`slack`, `atom`, `source`, …); switching to the pack's additive
+ * extractable set would drop all of them.
+ *
+ * Why it is SYNCHRONOUS: the v0.41.22 note above deferred this to v0.43+ "once
+ * an async eligibility-check signature is feasible across all call sites."
+ * That is not needed. `tryCachedPack` is a synchronous read of the in-process
+ * pack cache, and both real call sites (`operations.ts` put_page and
+ * `facts/backstop.ts`) run in a process that has already resolved the pack, so
+ * the cache is warm. No call-site signature changes.
+ *
+ * Fail-OPEN by design: a cold cache, absent config, or any throw returns null
+ * and eligibility falls back to exactly the previous behavior. A pack problem
+ * must never silently stop facts extraction, which is the same class of bug
+ * this change fixes.
+ */
+function packNonExtractableTypes(): Set<string> | null {
+  try {
+    // Both imports are sync. Kept inside the function so a config/pack failure
+    // cannot break module load for callers that never reach this line.
+    const { loadConfig } = require('../config.ts') as typeof import('../config.ts');
+    const { tryCachedPack } = require('../schema-pack/registry.ts') as typeof import('../schema-pack/registry.ts');
+    const { nonExtractableTypesFromPack } = require('../schema-pack/extractable.ts') as typeof import('../schema-pack/extractable.ts');
+
+    const packName = loadConfig()?.schema_pack;
+    if (!packName) return null;
+    const resolved = tryCachedPack(packName);
+    if (!resolved) return null;
+    return nonExtractableTypesFromPack(resolved.manifest);
+  } catch {
+    return null;
+  }
+}
+
 export function isFactsBackstopEligible(
   slug: string,
   parsed: { type: PageType; compiled_truth: string; frontmatter: Record<string, unknown> } | null | undefined,
@@ -89,6 +137,14 @@ export function isFactsBackstopEligible(
 
   const body = (parsed.compiled_truth ?? '').trim();
   if (body.length < MIN_BODY_CHARS) return { ok: false, reason: 'too_short' };
+
+  // An explicit pack declaration outranks both the hardcoded allowlist and the
+  // slug rescue. `meetings/`-shaped rescue exists to catch pages MIS-typed as
+  // `note`; it must not resurrect a type the pack deliberately excluded.
+  const packExcluded = packNonExtractableTypes();
+  if (packExcluded?.has(parsed.type)) {
+    return { ok: false, reason: `pack_not_extractable:${parsed.type}` };
+  }
 
   const typeOk = ELIGIBLE_TYPES.includes(parsed.type);
   const slugOk = RESCUE_SLUG_PREFIXES.some(p => slug.startsWith(p));

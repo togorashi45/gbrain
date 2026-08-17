@@ -123,6 +123,7 @@ export {
 
 export {
   extractableTypesFromPack,
+  nonExtractableTypesFromPack,
   extractableSpecsFromPack,
   getExtractableSpec,
   isExtractableType,
