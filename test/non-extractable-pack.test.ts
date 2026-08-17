@@ -114,3 +114,32 @@ describe('nonExtractableTypesFromPack', () => {
     expect(nonExtractableTypesFromPack(p).size).toBe(0);
   });
 });
+
+// The ADDITIVE half. A pack declaring `extractable: true` on a type outside the
+// hardcoded ELIGIBLE_TYPES must make it eligible, or the flag is one-way.
+describe('extractableTypesFromPack — the additive half', () => {
+  test('surfaces a type absent from the hardcoded eligible list', () => {
+    // Real case: rereset-stayops-v1 declares call-log over 4,699 Dialpad
+    // transcripts. `call-log` is not in ELIGIBLE_TYPES, so before the additive
+    // half the declaration did nothing at all.
+    const p = pack([
+      { name: 'call-log', primitive: 'temporal',
+        aliases: ['dialpad-call', 'phone-call'], extractable: true },
+    ]);
+    expect(extractableTypesFromPack(p).has('call-log')).toBe(true);
+    expect(nonExtractableTypesFromPack(p).has('call-log')).toBe(false);
+  });
+
+  test('a pack can flip a type in BOTH directions independently', () => {
+    const p = pack([
+      { name: 'call-log', primitive: 'temporal', extractable: true },
+      { name: 'email', primitive: 'temporal', extractable: false },
+    ]);
+    const add = extractableTypesFromPack(p);
+    const rm = nonExtractableTypesFromPack(p);
+    expect(add.has('call-log')).toBe(true);
+    expect(rm.has('call-log')).toBe(false);
+    expect(rm.has('email')).toBe(true);
+    expect(add.has('email')).toBe(false);
+  });
+});

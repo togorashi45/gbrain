@@ -78,8 +78,11 @@ const ELIGIBLE_TYPES: PageType[] = [
 const MIN_BODY_CHARS = 80;
 
 /**
- * Types the ACTIVE pack explicitly declares `extractable: false`, or null when
- * the pack is not resolvable synchronously.
+ * The ACTIVE pack's two-way override on facts eligibility, or null when the pack
+ * is not resolvable synchronously.
+ *
+ *   remove = types the pack explicitly declares `extractable: false`
+ *   add    = types the pack explicitly declares `extractable: true`
  *
  * Why this exists: a pack could already say `extractable: false` on a type and
  * this predicate ignored it, so the flag stopped atom extraction (which does
@@ -90,10 +93,17 @@ const MIN_BODY_CHARS = 80;
  * that exists to express "do not extract this" was honored by one pipeline and
  * silently ignored by the other.
  *
- * Why it is SUBTRACTIVE and not a replacement: see
- * `nonExtractableTypesFromPack`. `ELIGIBLE_TYPES` below holds types no pack
- * declares (`slack`, `atom`, `source`, …); switching to the pack's additive
- * extractable set would drop all of them.
+ * Why it OVERRIDES rather than REPLACES: `ELIGIBLE_TYPES` holds types no real
+ * pack declares (`slack`, `atom`, `source`, …), so swapping the list for the
+ * pack's extractable set would silently drop all of them. Overriding in both
+ * directions keeps the hardcoded floor and lets the pack speak. This is the same
+ * shape `extract-atoms.ts` already uses via `unionExtractableTypes`.
+ *
+ * Both directions were broken and in opposite ways:
+ *   false was ignored -> 30,604 email pages mined against the operator's
+ *     written "searchable, never extractable" decision
+ *   true was ignored  -> 4,699 Dialpad call transcripts declared extractable
+ *     and never mined; that brain held 32 facts across 11,965 pages
  *
  * Why it is SYNCHRONOUS: the v0.41.22 note above deferred this to v0.43+ "once
  * an async eligibility-check signature is feasible across all call sites."
@@ -107,16 +117,31 @@ const MIN_BODY_CHARS = 80;
  * must never silently stop facts extraction, which is the same class of bug
  * this change fixes.
  */
-let _exclusionCache: { name: string; types: Set<string>; atMs: number } | null = null;
+/**
+ * `concept` is never added from the pack even when the pack declares it
+ * extractable. v0.41.11 documented its flag as "cosmetic on the backstop path",
+ * the pre-existing suite pins `kind:concept` rejection, and concepts are
+ * SYNTHESIZED FROM facts and atoms, so extracting from them is a loop.
+ * `extract-atoms.ts` deletes the same set for the same reason.
+ */
+const NEVER_ADD_FROM_PACK = new Set<string>(['concept']);
+
+let _exclusionCache: {
+  name: string;
+  remove: Set<string>;
+  add: Set<string>;
+  atMs: number;
+} | null = null;
 const EXCLUSION_TTL_MS = 60_000;
 
-function packNonExtractableTypes(): Set<string> | null {
+function packEligibilityOverrides(): { remove: Set<string>; add: Set<string> } | null {
   try {
     // All imports are sync. Kept inside the function so a config/pack failure
     // cannot break module load for callers that never reach this line.
     const { loadConfig, gbrainPath } = require('../config.ts') as typeof import('../config.ts');
     const { tryCachedPack } = require('../schema-pack/registry.ts') as typeof import('../schema-pack/registry.ts');
-    const { nonExtractableTypesFromPack } = require('../schema-pack/extractable.ts') as typeof import('../schema-pack/extractable.ts');
+    const { nonExtractableTypesFromPack, extractableTypesFromPack } =
+      require('../schema-pack/extractable.ts') as typeof import('../schema-pack/extractable.ts');
 
     const packName = loadConfig()?.schema_pack;
     if (!packName) return null;
@@ -124,13 +149,22 @@ function packNonExtractableTypes(): Set<string> | null {
     if (_exclusionCache
       && _exclusionCache.name === packName
       && Date.now() - _exclusionCache.atMs < EXCLUSION_TTL_MS) {
-      return _exclusionCache.types;
+      return { remove: _exclusionCache.remove, add: _exclusionCache.add };
     }
+
+    const build = (manifest: Parameters<typeof nonExtractableTypesFromPack>[0]) => {
+      const add = new Set<string>();
+      for (const t of extractableTypesFromPack(manifest)) {
+        if (!NEVER_ADD_FROM_PACK.has(t)) add.add(t);
+      }
+      return { remove: nonExtractableTypesFromPack(manifest), add };
+    };
 
     // Preferred: the in-process pack cache, already resolved with its full
     // `extends` chain.
     const resolved = tryCachedPack(packName);
-    let types: Set<string> | null = resolved ? nonExtractableTypesFromPack(resolved.manifest) : null;
+    let ov: { remove: Set<string>; add: Set<string> } | null =
+      resolved ? build(resolved.manifest) : null;
 
     // Fallback: read the pack off disk synchronously.
     //
@@ -145,17 +179,17 @@ function packNonExtractableTypes(): Set<string> | null {
     // path honors only what the ACTIVE pack declares itself. That is the
     // conservative direction: it can miss an inherited `extractable: false`,
     // but it can never invent an exclusion the operator did not write.
-    if (!types) {
+    if (!ov) {
       const { loadPackFromFile } = require('../schema-pack/loader.ts') as typeof import('../schema-pack/loader.ts');
       const { join } = require('node:path') as typeof import('node:path');
       const { existsSync } = require('node:fs') as typeof import('node:fs');
       const path = join(gbrainPath(), 'schema-packs', packName, 'pack.yaml');
       if (!existsSync(path)) return null;
-      types = nonExtractableTypesFromPack(loadPackFromFile(path));
+      ov = build(loadPackFromFile(path));
     }
 
-    _exclusionCache = { name: packName, types, atMs: Date.now() };
-    return types;
+    _exclusionCache = { name: packName, remove: ov.remove, add: ov.add, atMs: Date.now() };
+    return ov;
   } catch {
     return null;
   }
@@ -182,12 +216,20 @@ export function isFactsBackstopEligible(
   // An explicit pack declaration outranks both the hardcoded allowlist and the
   // slug rescue. `meetings/`-shaped rescue exists to catch pages MIS-typed as
   // `note`; it must not resurrect a type the pack deliberately excluded.
-  const packExcluded = packNonExtractableTypes();
-  if (packExcluded?.has(parsed.type)) {
+  const ov = packEligibilityOverrides();
+  if (ov?.remove.has(parsed.type)) {
     return { ok: false, reason: `pack_not_extractable:${parsed.type}` };
   }
 
-  const typeOk = ELIGIBLE_TYPES.includes(parsed.type);
+  // ADDITIVE half, mirroring extract-atoms.ts's `unionExtractableTypes`:
+  // a type the pack declares `extractable: true` becomes eligible even when it
+  // is absent from the hardcoded list. Without this, declaring a type
+  // extractable did nothing for facts and the flag was silently one-way.
+  //
+  // Real case: a pack declared `call-log: extractable: true` over 4,699 Dialpad
+  // transcripts and nothing happened, because `call-log` is not in
+  // ELIGIBLE_TYPES. That brain held 32 facts across 11,965 pages.
+  const typeOk = ELIGIBLE_TYPES.includes(parsed.type) || (ov?.add.has(parsed.type) ?? false);
   const slugOk = RESCUE_SLUG_PREFIXES.some(p => slug.startsWith(p));
   if (!typeOk && !slugOk) return { ok: false, reason: `kind:${parsed.type}` };
 
