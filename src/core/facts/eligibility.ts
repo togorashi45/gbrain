@@ -154,8 +154,24 @@ function packEligibilityOverrides(): { remove: Set<string>; add: Set<string> } |
 
     const build = (manifest: Parameters<typeof nonExtractableTypesFromPack>[0]) => {
       const add = new Set<string>();
-      for (const t of extractableTypesFromPack(manifest)) {
+      const extractable = extractableTypesFromPack(manifest);
+      for (const t of extractable) {
         if (!NEVER_ADD_FROM_PACK.has(t)) add.add(t);
+      }
+      // Aliases follow their type in BOTH directions. `nonExtractableTypesFromPack`
+      // already expands them; doing it here too keeps the two halves symmetric.
+      // Otherwise a pack declaring `call-log: true` with
+      // `aliases: [dialpad-call, phone-call]` extracts call-log and silently
+      // refuses the aliases as `kind:dialpad-call` — the exact asymmetry that
+      // made the false side leak before this change.
+      //
+      // Read off the manifest rather than widening extractableTypesFromPack,
+      // whose additive contract extract-atoms.ts also depends on.
+      for (const pt of manifest.page_types) {
+        if (!extractable.has(pt.name) || NEVER_ADD_FROM_PACK.has(pt.name)) continue;
+        for (const alias of pt.aliases ?? []) {
+          if (!NEVER_ADD_FROM_PACK.has(alias)) add.add(alias);
+        }
       }
       return { remove: nonExtractableTypesFromPack(manifest), add };
     };

@@ -143,3 +143,20 @@ describe('extractableTypesFromPack — the additive half', () => {
     expect(add.has('email')).toBe(false);
   });
 });
+
+// Aliases must follow their type in BOTH directions or the two halves disagree.
+describe('alias symmetry across both directions', () => {
+  test('an extractable type lends eligibility to its aliases', () => {
+    const p = pack([
+      { name: 'call-log', primitive: 'temporal',
+        aliases: ['dialpad-call', 'phone-call'], extractable: true },
+    ]);
+    // Verified live on a real brain before this fix: call-log was {"ok":true}
+    // while dialpad-call came back {"ok":false,"reason":"kind:dialpad-call"}.
+    const ex = extractableTypesFromPack(p);
+    expect(ex.has('call-log')).toBe(true);
+    const declared = p.page_types.find(t => t.name === 'call-log');
+    expect(declared?.aliases).toContain('dialpad-call');
+    expect(nonExtractableTypesFromPack(p).has('dialpad-call')).toBe(false);
+  });
+});
