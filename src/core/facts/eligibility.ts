@@ -107,22 +107,63 @@ const MIN_BODY_CHARS = 80;
  * must never silently stop facts extraction, which is the same class of bug
  * this change fixes.
  */
+let _exclusionCache: { name: string; types: Set<string>; atMs: number } | null = null;
+const EXCLUSION_TTL_MS = 60_000;
+
 function packNonExtractableTypes(): Set<string> | null {
   try {
-    // Both imports are sync. Kept inside the function so a config/pack failure
+    // All imports are sync. Kept inside the function so a config/pack failure
     // cannot break module load for callers that never reach this line.
-    const { loadConfig } = require('../config.ts') as typeof import('../config.ts');
+    const { loadConfig, gbrainPath } = require('../config.ts') as typeof import('../config.ts');
     const { tryCachedPack } = require('../schema-pack/registry.ts') as typeof import('../schema-pack/registry.ts');
     const { nonExtractableTypesFromPack } = require('../schema-pack/extractable.ts') as typeof import('../schema-pack/extractable.ts');
 
     const packName = loadConfig()?.schema_pack;
     if (!packName) return null;
+
+    if (_exclusionCache
+      && _exclusionCache.name === packName
+      && Date.now() - _exclusionCache.atMs < EXCLUSION_TTL_MS) {
+      return _exclusionCache.types;
+    }
+
+    // Preferred: the in-process pack cache, already resolved with its full
+    // `extends` chain.
     const resolved = tryCachedPack(packName);
-    if (!resolved) return null;
-    return nonExtractableTypesFromPack(resolved.manifest);
+    let types: Set<string> | null = resolved ? nonExtractableTypesFromPack(resolved.manifest) : null;
+
+    // Fallback: read the pack off disk synchronously.
+    //
+    // This branch is load-bearing, not belt-and-braces. `tryCachedPack` is
+    // empty in any process that has not already resolved the pack, and relying
+    // on "something upstream probably warmed it" would reintroduce exactly the
+    // failure being fixed: a declared exclusion that silently does not apply.
+    // Measured on a live brain: warm returned pack_not_extractable:email, cold
+    // returned ok:true for the same page.
+    //
+    // Leaf-only by design. `loadPackFromFile` does not walk `extends`, so this
+    // path honors only what the ACTIVE pack declares itself. That is the
+    // conservative direction: it can miss an inherited `extractable: false`,
+    // but it can never invent an exclusion the operator did not write.
+    if (!types) {
+      const { loadPackFromFile } = require('../schema-pack/loader.ts') as typeof import('../schema-pack/loader.ts');
+      const { join } = require('node:path') as typeof import('node:path');
+      const { existsSync } = require('node:fs') as typeof import('node:fs');
+      const path = join(gbrainPath(), 'schema-packs', packName, 'pack.yaml');
+      if (!existsSync(path)) return null;
+      types = nonExtractableTypesFromPack(loadPackFromFile(path));
+    }
+
+    _exclusionCache = { name: packName, types, atMs: Date.now() };
+    return types;
   } catch {
     return null;
   }
+}
+
+/** Test seam: drop the memoized exclusion set. */
+export function _resetPackExclusionCacheForTests(): void {
+  _exclusionCache = null;
 }
 
 export function isFactsBackstopEligible(
