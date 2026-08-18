@@ -3290,9 +3290,49 @@ export function toAISDKTools(tools: ChatToolDef[] | undefined): Record<string, a
   }, {} as Record<string, any>);
 }
 
+/**
+ * Opt-in call attribution: `GBRAIN_CHAT_AUDIT=/path/to/file.jsonl`.
+ *
+ * There are 33 `chat()` call sites and the gateway sends no identifying header,
+ * so OpenRouter's activity API can report 3,340 requests/day on one model with
+ * no way to say which code produced them. Without attribution you are reduced
+ * to guessing which phase is expensive, and a wrong guess costs days: an
+ * extraction model was swapped on the strength of one such guess and the volume
+ * did not move, because extraction was ~189 of those 3,340 calls.
+ *
+ * Records model, tier-vs-explicit, a stable fingerprint of the system prompt
+ * (its first line), and prompt size. The system prompt's first line identifies
+ * the caller uniquely in practice and is far cheaper than threading a `purpose`
+ * field through every call site.
+ *
+ * OFF unless the env var is set. Never throws: a diagnostic that can break the
+ * gateway is worse than no diagnostic.
+ */
+function auditChatCall(model: string, explicit: boolean, opts: ChatOpts): void {
+  const dest = process.env.GBRAIN_CHAT_AUDIT;
+  if (!dest) return;
+  try {
+    const sys = typeof opts.system === 'string' ? opts.system : '';
+    const firstLine = sys.split('\n').find(l => l.trim().length > 0)?.slice(0, 90) ?? '(no system prompt)';
+    const userChars = opts.messages?.reduce(
+      (n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0) ?? 0;
+    // require() so a missing fs in an exotic runtime cannot break module load
+    const { appendFileSync } = require('node:fs') as typeof import('node:fs');
+    appendFileSync(dest, JSON.stringify({
+      t: new Date().toISOString(),
+      model,
+      explicit,            // false = fell through to the default chat model / tier
+      sys: firstLine,
+      sys_chars: sys.length,
+      user_chars: userChars,
+    }) + '\n');
+  } catch { /* diagnostics never break the call path */ }
+}
+
 export async function chat(opts: ChatOpts): Promise<ChatResult> {
   const tracker = __budgetStore.getStore() ?? null;
   const modelStrEarly = opts.model ?? getChatModel();
+  auditChatCall(modelStrEarly, opts.model !== undefined, opts);
 
   // Guardrail seam: classify ONLY the latest user message before provider
   // inference. Observe-only / fail-open; no-op without a registered guardrail.
