@@ -37,6 +37,31 @@ import { sourceConfigHasRemoteUrl } from '../core/sources-load.ts';
 
 const FULL_CYCLE_FLOOR_MIN = 60;
 
+/**
+ * Per-source cycle cadence, overridable via `autopilot.full_cycle_floor_min`.
+ *
+ * `autopilot.global_floor_min` already existed for GLOBAL maintenance; the
+ * per-source floor was hardcoded, so a brain could not slow its own cycles down
+ * without editing source. That asymmetry matters on a low-churn brain: one
+ * observed brain ran 25 cycles a day, each executing 14 phases (synthesize,
+ * patterns, consolidate, propose_takes, enrich_thin, schema-suggest are all LLM
+ * work) while the cycle totals came back ALL ZEROS -- no pages synced,
+ * extracted, embedded, or written. Hourly full cycles over a corpus that gained
+ * ~46 pages that day.
+ *
+ * Fail-soft and clamped to >= 1 like the global knob. Unset keeps 60.
+ */
+async function resolveFullCycleFloorMin(engine: BrainEngine): Promise<number> {
+  try {
+    const cfg = await engine.getConfig('autopilot.full_cycle_floor_min');
+    if (cfg) {
+      const n = parseInt(cfg, 10);
+      if (Number.isFinite(n) && n >= 1) return n;
+    }
+  } catch { /* fall through to the default */ }
+  return FULL_CYCLE_FLOOR_MIN;
+}
+
 // #2194 fix #2: failure cooldown. A source whose autopilot-cycle keeps
 // failing/timing-out re-dispatches every tick today (only SUCCESS gates
 // dispatch), so the same handful of sources fail and re-fan-out forever — the
@@ -425,8 +450,9 @@ export async function dispatchPerSource(
     cooldownOpts = { baseMin: 0, capMin: FAILURE_COOLDOWN_CAP_MIN };
   }
 
+  const fullCycleFloorMin = await resolveFullCycleFloorMin(engine);
   const { dispatch, skippedFresh, skippedCap, skippedCooldown } =
-    selectSourcesForDispatch(sources, opts.fanoutMax, Date.now(), FULL_CYCLE_FLOOR_MIN, recentFailures, cooldownOpts);
+    selectSourcesForDispatch(sources, opts.fanoutMax, Date.now(), fullCycleFloorMin, recentFailures, cooldownOpts);
 
   const dispatched: string[] = [];
   for (const src of dispatch) {
