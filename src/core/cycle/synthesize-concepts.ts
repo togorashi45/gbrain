@@ -31,6 +31,7 @@ import { chat as gatewayChat, isAvailable } from '../ai/gateway.ts';
 import { importFromContent } from '../import-file.ts';
 import { serializeMarkdown } from '../markdown.ts';
 import { canonicalLookup, type ModelPricing } from '../model-pricing.ts';
+import { resolveModel } from '../model-config.ts';
 
 const DEFAULT_BUDGET_USD = 1.5;
 // Canonical-miss policy — mirrors skillopt/preflight.ts's lookupPrice:
@@ -79,11 +80,46 @@ Output ONLY the summary paragraph (3-5 sentences). No headers, no JSON,
 no preamble. Write in plain English, present-tense voice. Synthesize what
 the atoms collectively SAY about the concept; don't enumerate the atoms.`;
 
+/**
+ * Resolve the model for concept summarization.
+ *
+ * This phase was the ONLY cycle phase with no config key. Its sibling phases all
+ * have one (`models.dream.synthesize`, `models.dream.patterns`,
+ * `models.dream.extract_atoms`, `models.dream.synthesize_verdict`), so each can
+ * be priced independently. Concept synthesis fell through to the default chat
+ * model instead, which means it silently inherited whatever
+ * `models.tier.reasoning` was set to and could not be moved without moving every
+ * other unspecified call in the codebase with it.
+ *
+ * That mattered. Call attribution on a live brain (GBRAIN_CHAT_AUDIT) showed
+ * this phase issuing 59 of 109 chat() calls in a single cycle, every one on the
+ * frontier model the reasoning tier pointed at, while the sibling phase beside
+ * it ran 50 calls on an explicitly-configured gpt-4o-mini. It was the single
+ * largest consumer on that brain and it was invisible, because nothing named it.
+ *
+ * Defaults to tier `reasoning`, which is exactly the pre-change behavior: adding
+ * the key must not move anyone's model by itself. Set
+ * `models.dream.synthesize_concepts` to price it.
+ */
+async function resolveConceptSynthesisModel(engine: BrainEngine): Promise<string | undefined> {
+  try {
+    return await resolveModel(engine, {
+      configKey: 'models.dream.synthesize_concepts',
+      tier: 'reasoning',
+      fallback: 'anthropic:claude-sonnet-4-6',
+    });
+  } catch {
+    // Fail-soft to the gateway default: a config read must never stop the phase.
+    return undefined;
+  }
+}
+
 export async function runPhaseSynthesizeConcepts(
   engine: BrainEngine,
   opts: SynthesizeConceptsOpts = {},
 ): Promise<PhaseResult> {
   const chat = opts._chat ?? gatewayChat;
+  const conceptModel = opts._chat ? undefined : await resolveConceptSynthesisModel(engine);
 
   // 1. Get atom pages (test seam OR DB query)
   let atoms = opts._atoms ?? [];
@@ -196,6 +232,7 @@ export async function runPhaseSynthesizeConcepts(
       } else {
         try {
           const result = await chat({
+            ...(conceptModel ? { model: conceptModel } : {}),
             system: SYNTH_PROMPT,
             messages: [
               {

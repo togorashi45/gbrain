@@ -50,6 +50,7 @@ const PER_TASK_KEYS: PerTaskModelRoute[] = [
   { key: 'models.dream.synthesize',         tier: 'reasoning', description: 'Dream synthesis (conversation → brain pages)' },
   { key: 'models.dream.synthesize_verdict', tier: 'utility',   description: 'Dream synthesis verdict (Haiku judge)' },
   { key: 'models.dream.patterns',           tier: 'reasoning', description: 'Pattern discovery (cross-take themes)' },
+  { key: 'models.dream.synthesize_concepts', tier: 'reasoning', description: 'Concept summaries (atoms -> 1-paragraph concept page)' },
   { key: 'models.drift',                    tier: 'reasoning', description: 'Drift LLM judge (v0.29 scaffold)' },
   { key: 'models.auto_think',               tier: 'deep',      description: 'Auto-think question answering' },
   { key: 'models.think',                    tier: 'deep',      description: '`gbrain think` synthesis op' },
